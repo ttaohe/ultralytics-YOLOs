@@ -5,7 +5,13 @@ from pathlib import Path
 
 import numpy as np
 
-from .geope import encode_view_geocoords, visualize_lonlat, _load_H_json
+from .geope import (
+    encode_view_geocoords,
+    visualize_lonlat,
+    _load_H_json,
+    _open_raster_transform,
+    _get_raster_size,
+)
 
 
 def main():
@@ -25,8 +31,6 @@ def main():
     # 保存npy
     (np.save(out / "lon.npy", lon_grid), np.save(out / "lat.npy", lat_grid), np.save(out / "mask.npy", mask))
 
-    import pdb
-    pdb.set_trace()
     # 可视化
     vis = visualize_lonlat(lon_grid, lat_grid, mask)
     try:
@@ -129,6 +133,39 @@ def main():
         pass
 
     print(f"Saved: {out}/geope.png and lon/lat/mask .npy")
+
+    # 基准正射影像的地理位置编码可视化（用于对齐对比）
+    try:
+        import numpy as _np
+        T, _ = _open_raster_transform(args.base_geotiff)
+        Wb, Hb = _get_raster_size(args.base_geotiff)
+        gy_b, gx_b = _np.mgrid[0: Hb: args.stride, 0: Wb: args.stride]
+        cols_b = gx_b.astype(_np.float64)
+        rows_b = gy_b.astype(_np.float64)
+        # 像元中心
+        xy1 = _np.stack([cols_b + 0.5, rows_b + 0.5, _np.ones_like(cols_b)], axis=-1)
+        xy = xy1 @ T.T
+        lon_b = xy[..., 0]
+        lat_b = xy[..., 1]
+        mask_b = _np.ones_like(lon_b, dtype=bool)
+        # 保存
+        _np.save(out / "lon_base.npy", lon_b)
+        _np.save(out / "lat_base.npy", lat_b)
+        _np.save(out / "mask_base.npy", mask_b)
+        vis_b = visualize_lonlat(lon_b, lat_b, mask_b)
+        try:
+            import cv2
+            cv2.imwrite(str(out / "geope_base.png"), vis_b)
+            # 灰度导出
+            lon_bn = (lon_b - _np.nanmin(lon_b)) / max(_np.nanmax(lon_b) - _np.nanmin(lon_b), 1e-12)
+            lat_bn = (lat_b - _np.nanmin(lat_b)) / max(_np.nanmax(lat_b) - _np.nanmin(lat_b), 1e-12)
+            cv2.imwrite(str(out / "lon_base.png"), (lon_bn * 255).astype(_np.uint8))
+            cv2.imwrite(str(out / "lat_base.png"), (lat_bn * 255).astype(_np.uint8))
+        except Exception:
+            from PIL import Image as _Image
+            _Image.fromarray(vis_b[:, :, ::-1]).save(out / "geope_base.png")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
