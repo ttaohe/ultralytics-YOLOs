@@ -174,3 +174,7 @@ pnnx*
 
 # calibration image
 calibration_*.npy
+
+
+#custom ign
+trained_weights/

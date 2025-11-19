@@ -116,8 +116,8 @@ flipud: 0.0 # (float) vertical flip probability
 fliplr: 0.5 # (float) horizontal flip probability
 bgr: 0.0 # (float) RGB↔BGR channel swap probability
 mosaic: 1.0 # (float) mosaic augmentation probability
-mixup: 0.0 # (float) MixUp augmentation probability
-cutmix: 0.0 # (float) CutMix augmentation probability
+mixup: 0.2 # (float) MixUp augmentation probability
+cutmix: 0.2 # (float) CutMix augmentation probability
 copy_paste: 0.0 # (float) segmentation copy-paste probability
 copy_paste_mode: flip # (str) copy-paste strategy for segmentation: flip or mixup
 auto_augment: randaugment # (str) classification auto augmentation policy: randaugment, autoaugment, augmix

@@ -26,6 +26,7 @@ def non_max_suppression(
     rotated: bool = False,
     end2end: bool = False,
     return_idxs: bool = False,
+    soft_nms: bool = True,
 ):
     """
     Perform non-maximum suppression (NMS) on prediction results.
@@ -149,7 +150,9 @@ def non_max_suppression(
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
             # Speed strategy: torchvision for val or already loaded (faster), TorchNMS for predict (lower latency)
-            if "torchvision" in sys.modules:
+            if soft_nms:
+                i = TorchNMS.soft_nms(boxes, scores, iou_thres, sigma=0.5)
+            elif "torchvision" in sys.modules:
                 import torchvision  # scope as slow import
 
                 i = torchvision.ops.nms(boxes, scores, iou_thres)
@@ -296,6 +299,78 @@ class TorchNMS:
             order = rest[iou <= iou_threshold]
 
         return keep[:keep_idx]
+
+    @staticmethod
+    def soft_nms(
+        boxes: torch.Tensor,
+        scores: torch.Tensor,
+        iou_threshold: float = 0.5,
+        sigma: float = 0.5,
+        score_threshold: float = 0.001,
+    ) -> torch.Tensor:
+        """
+        Soft-NMS implementation using Gaussian penalty.
+
+        Args:
+            boxes (torch.Tensor): Bounding boxes with shape (N, 4) in xyxy format.
+            scores (torch.Tensor): Confidence scores with shape (N,).
+            iou_threshold (float): IoU threshold (unused in Gaussian, kept for compatibility).
+            sigma (float): Gaussian parameter.
+            score_threshold (float): Filter threshold.
+
+        Returns:
+            (torch.Tensor): Indices of boxes to keep.
+        """
+        if boxes.numel() == 0:
+            return torch.empty((0,), dtype=torch.int64, device=boxes.device)
+
+        # Indexes to keep track of original boxes
+        N = boxes.shape[0]
+        indexes = torch.arange(N, dtype=torch.long, device=boxes.device)
+        keep = []
+
+        while scores.numel() > 0:
+            # Find max score
+            max_idx = torch.argmax(scores)
+            keep.append(indexes[max_idx])
+
+            # Current max box
+            current_box = boxes[max_idx]
+
+            # Create mask for remaining boxes (excluding current max)
+            mask = torch.ones(scores.shape[0], dtype=torch.bool, device=scores.device)
+            mask[max_idx] = False
+
+            if not mask.any():
+                break
+
+            boxes = boxes[mask]
+            scores = scores[mask]
+            indexes = indexes[mask]
+
+            # IoU calculation
+            x1 = torch.max(current_box[0], boxes[:, 0])
+            y1 = torch.max(current_box[1], boxes[:, 1])
+            x2 = torch.min(current_box[2], boxes[:, 2])
+            y2 = torch.min(current_box[3], boxes[:, 3])
+
+            inter = (x2 - x1).clamp(min=0) * (y2 - y1).clamp(min=0)
+            area1 = (current_box[2] - current_box[0]) * (current_box[3] - current_box[1])
+            area2 = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+            union = area1 + area2 - inter
+            ious = inter / union
+
+            # Gaussian decay
+            decay = torch.exp(-(ious ** 2) / sigma)
+            scores = scores * decay
+
+            # Filter low scoring boxes
+            keep_mask = scores > score_threshold
+            boxes = boxes[keep_mask]
+            scores = scores[keep_mask]
+            indexes = indexes[keep_mask]
+
+        return torch.tensor(keep, dtype=torch.long, device=boxes.device)
 
     @staticmethod
     def batched_nms(

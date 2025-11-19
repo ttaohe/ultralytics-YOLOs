@@ -1,0 +1,2 @@
+export SETUPTOOLS_EGG_INFO_PATH=.egg-info-3090
+pip install -e .
