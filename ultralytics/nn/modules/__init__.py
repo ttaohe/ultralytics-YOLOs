@@ -101,6 +101,8 @@ from .transformer import (
     TransformerEncoderLayer,
     TransformerLayer,
 )
+from .trajectory import TrajectoryBlock, MotionAligner
+from .video_block import YOLOMemoryAttention
 
 __all__ = (
     "Conv",
@@ -179,4 +181,7 @@ __all__ = (
     "TorchVision",
     "Index",
     "A2C2f",
+    "TrajectoryBlock",
+    "MotionAligner",
+    "YOLOMemoryAttention",
 )

@@ -165,6 +165,7 @@ def draw_boxes(
 	tp_classes: List[int],
 	fp_classes: List[int],
 	fn_classes: List[int],
+	fp_ious: List[float] = None,
 ) -> np.ndarray:
 	"""
 	Draw boxes on a copy of the image.
@@ -184,9 +185,17 @@ def draw_boxes(
 	for b, c in zip(tp_boxes, tp_classes):
 		cls_name = class_names.get(int(c), str(int(c)))
 		put_box(b, (0, 200, 0), f"TP {cls_name}")
-	for b, c in zip(fp_boxes, fp_classes):
+	
+	if fp_ious is None:
+		fp_ious = [0.0] * len(fp_boxes)
+
+	for b, c, iou in zip(fp_boxes, fp_classes, fp_ious):
 		cls_name = class_names.get(int(c), str(int(c)))
-		put_box(b, (0, 0, 255), f"FP {cls_name}")
+		label = f"FP {cls_name}"
+		if iou > 0:
+			label += f" ({iou:.2f})"
+		put_box(b, (0, 0, 255), label)
+
 	for b, c in zip(fn_boxes, fn_classes):
 		cls_name = class_names.get(int(c), str(int(c)))
 		put_box(b, (255, 100, 0), f"FN {cls_name}")
@@ -231,7 +240,7 @@ def main() -> None:
 	parser = argparse.ArgumentParser(description="Visualize FP/FN for a YOLO model on a dataset split.")
 	parser.add_argument("--weights", type=str, required=True, help="Path to model weights (e.g., best.pt)")
 	parser.add_argument("--data", type=str, default="ultralytics/cfg/datasets/VisDrone.yaml", help="Dataset YAML path")
-	parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"], help="Dataset split")
+	parser.add_argument("--split", type=str, default="val", choices=["train", "val", "test"], help="Dataset split")
 	parser.add_argument("--imgsz", type=int, default=1280, help="Inference image size")
 	parser.add_argument("--batch", type=int, default=1, help="Inference batch size")
 	parser.add_argument("--conf", type=float, default=0.25, help="Confidence threshold for predictions")
@@ -302,13 +311,17 @@ def main() -> None:
 				print(f"Warning: failed to read image: {img_path}", file=sys.stderr)
 				continue
 			h, w = img.shape[:2]
-
 			# GT
-			label_path = labels_dir / (img_path.stem + ".txt")
+			# Handle subdirectories (e.g. VisDrone VID: images/test/seq/001.jpg -> labels/test/seq/001.txt)
+			try:
+				rel_path = img_path.relative_to(images_dir)
+				label_path = labels_dir / rel_path.with_suffix(".txt")
+			except ValueError:
+				label_path = labels_dir / (img_path.stem + ".txt")
+
 			gt_pairs = read_yolo_label_file(label_path, w, h)
 			gt_classes = np.array([int(c) for c, _ in gt_pairs], dtype=np.int32)
 			gt_boxes = np.stack([b for _, b in gt_pairs], axis=0) if len(gt_pairs) else np.zeros((0, 4), dtype=np.float32)
-
 			# Predictions
 			preds: List[Box] = []
 			if res.boxes is not None and len(res.boxes) > 0:
@@ -327,6 +340,7 @@ def main() -> None:
 			tp_cls_list: List[int] = []
 			fp_cls_list: List[int] = []
 			fn_cls_list: List[int] = []
+			fp_ious_list: List[float] = []
 
 			all_classes = set(pred_classes.tolist()) | set(gt_classes.tolist())
 			for c in sorted(all_classes):
@@ -340,10 +354,23 @@ def main() -> None:
 				for pi, gi in matches:
 					tp_boxes.append(p_boxes_c[pi])
 					tp_cls_list.append(int(c))
+
+				# Compute FP IoUs (with any GT of same class)
+				if len(un_p) > 0 and g_boxes_c.shape[0] > 0:
+					# IoU matrix between FP boxes and all GT boxes of same class
+					fp_boxes_c = p_boxes_c[un_p]
+					iou_matrix = compute_iou_matrix(fp_boxes_c, g_boxes_c)
+					# For each FP, find max IoU with any GT
+					max_ious = iou_matrix.max(axis=1) if iou_matrix.size > 0 else np.zeros(len(un_p))
+				else:
+					max_ious = np.zeros(len(un_p))
+
 				# FP
-				for pi in un_p:
+				for i, pi in enumerate(un_p):
 					fp_boxes.append(p_boxes_c[pi])
 					fp_cls_list.append(int(c))
+					fp_ious_list.append(float(max_ious[i]))
+
 				# FN
 				for gi in un_g:
 					fn_boxes.append(g_boxes_c[gi])
@@ -358,7 +385,16 @@ def main() -> None:
 				tp_classes=tp_cls_list if args.draw_tp else [],
 				fp_classes=fp_cls_list,
 				fn_classes=fn_cls_list,
+				fp_ious=fp_ious_list,
 			)
+
+			# Construct relative path string for CSV/txt (e.g., "seq1/001.jpg")
+			try:
+				rel_path_obj = img_path.relative_to(images_dir)
+				img_rel_name = str(rel_path_obj)
+			except ValueError:
+				img_rel_name = img_path.name
+				rel_path_obj = Path(img_path.name)
 
 			num_gt = gt_boxes.shape[0]
 			num_pred = pred_boxes.shape[0]
@@ -366,12 +402,13 @@ def main() -> None:
 			num_fp = len(fp_boxes)
 			num_fn = len(fn_boxes)
 			if num_fp > 0:
-				images_with_fp.append(img_path.name)
+				images_with_fp.append(img_rel_name)
 			if num_fn > 0:
-				images_with_fn.append(img_path.name)
+				images_with_fn.append(img_rel_name)
 
-			# Save detection visualization
-			save_path = vis_dir / f"{img_path.stem}_fpfn.jpg"
+			# Save detection visualization (preserve directory structure)
+			save_path = vis_dir / rel_path_obj.with_name(f"{rel_path_obj.stem}_fpfn.jpg")
+			save_path.parent.mkdir(parents=True, exist_ok=True)
 			cv2.imwrite(str(save_path), out_img)
 
 
@@ -394,12 +431,13 @@ def main() -> None:
 					gt_classes_sel = gt_classes
 
 				gt_img = draw_gt_boxes(img, gt_boxes_sel, gt_classes_sel, class_names)
-				gt_save_path = gt_dir / f"{img_path.stem}_gt.jpg"
+				gt_save_path = gt_dir / rel_path_obj.with_name(f"{rel_path_obj.stem}_gt.jpg")
+				gt_save_path.parent.mkdir(parents=True, exist_ok=True)
 				cv2.imwrite(str(gt_save_path), gt_img)
 
 			writer.writerow(
 				[
-					img_path.name,
+					img_rel_name,
 					num_gt,
 					num_pred,
 					num_tp,

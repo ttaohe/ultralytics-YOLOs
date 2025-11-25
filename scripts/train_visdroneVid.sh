@@ -1,1 +1,1 @@
-yolo train project=runs/train data=ultralytics/cfg/datasets/VisDrone.yaml model=yolov10l.pt workers=8 imgsz=800 batch=8 epochs=300 name=train_yolov10l_visroneDet_epoch300_imgsz800_batch8_mixup02_cutmix02
+yolo train project=runs/train data=ultralytics/cfg/datasets/VisDrone.yaml model=/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/v10/yolov10l-p2-no-p5.yaml workers=8 imgsz=1280 batch=4 epochs=300 name=train_yolov10l-p234_visroneDet_epoch300_imgsz800_batch4_mixup02_cutmix02

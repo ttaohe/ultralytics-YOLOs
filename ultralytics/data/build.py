@@ -16,6 +16,7 @@ from torch.utils.data import dataloader, distributed
 
 from ultralytics.cfg import IterableSimpleNamespace
 from ultralytics.data.dataset import GroundingDataset, YOLODataset, YOLOMultiModalDataset
+from ultralytics.data.video_dataset import VisDroneVideoDataset
 from ultralytics.data.loaders import (
     LOADERS,
     LoadImagesAndVideos,
@@ -130,7 +131,13 @@ def build_yolo_dataset(
     multi_modal: bool = False,
 ):
     """Build and return a YOLO dataset based on configuration parameters."""
-    dataset = YOLOMultiModalDataset if multi_modal else YOLODataset
+    if multi_modal:
+        dataset = YOLOMultiModalDataset
+    elif data.get("video_mode"):
+        dataset = VisDroneVideoDataset
+    else:
+        dataset = YOLODataset
+
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
