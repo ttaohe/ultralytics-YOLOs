@@ -14,13 +14,29 @@ class VisDroneVideoDataset(YOLODataset):
     This dataset loads pairs of (current_frame, history_frame) and computes 
     the Homography matrix between them to support Trajectory-Guided Attention.
     """
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, use_homography=False, **kwargs):
         self._hyp = kwargs.get("hyp")
+        self.use_homography = use_homography
+        
+        # Save original flip probabilities and disable them for super()
+        # We will manually handle flip in __getitem__ to ensure synchronization
+        if self._hyp:
+            self.fliplr = getattr(self._hyp, "fliplr", 0.0)
+            self.flipud = getattr(self._hyp, "flipud", 0.0)
+            self._hyp.fliplr = 0.0
+            self._hyp.flipud = 0.0
+        else:
+            self.fliplr = 0.0
+            self.flipud = 0.0
+            
         super().__init__(*args, **kwargs)
         # Parse video sequences from image paths
         self.video_indices = self._get_video_indices()
         # ORB detector for motion estimation
-        self.orb = cv2.ORB_create(nfeatures=500)
+        if self.use_homography:
+            self.orb = cv2.ORB_create(nfeatures=500)
+        else:
+            self.orb = None
         self._check_video_augmentations()
 
     def _get_video_indices(self):
@@ -49,7 +65,7 @@ class VisDroneVideoDataset(YOLODataset):
             # Sort by video name for cleaner output
             for vid_name in sorted(vid_map.keys()):
                 count = video_counts[vid_name]
-                LOGGER.info(f"{self.prefix}  - Video {vid_name}: {count} frames")
+                LOGGER.debug(f"{self.prefix}  - Video {vid_name}: {count} frames")
         
         return np.array(video_ids)
 
@@ -62,23 +78,42 @@ class VisDroneVideoDataset(YOLODataset):
 
     def load_history(self, i, current_img):
         """
-        Load history image (t-1) and compute Homography.
+        Load history image (t-k) and compute Homography.
+        Now supports random temporal stride for training.
         """
-        # Check if index i-1 exists and belongs to the same video
-        if i > 0 and self.video_indices[i] == self.video_indices[i-1]:
-            prev_i = i - 1
-            # Load raw previous image (without augmentation for now to compute H reliably)
-            # Note: ideally we compute H on raw images, then apply same aug to H.
-            # For simplicity here, we re-load raw previous image.
+        hist_file = self.im_files[i]
+        
+        # Random Stride Logic (SAM3-style)
+        # Default to 1 (t-1) if not training or if stride not configured
+        stride_min = 1
+        stride_max = 10 if self.augment else 1
+        
+        # Determine random stride
+        stride = np.random.randint(stride_min, stride_max + 1)
+
+        # Check if index i-stride exists and belongs to the same video
+        if i >= stride and self.video_indices[i] == self.video_indices[i-stride]:
+            prev_i = i - stride
+            hist_file = self.im_files[prev_i]
             try:
                 prev_img, _, _ = super().load_image(prev_i, rect_mode=False)
             except Exception:
                 prev_img = current_img.copy()
         else:
-            # First frame of sequence, use current frame as history
-            prev_img = current_img.copy()
+            # If random stride jumps out of video boundary, fall back to t-1
+            # If t-1 is also invalid (first frame), use current
+            if i > 0 and self.video_indices[i] == self.video_indices[i-1]:
+                 prev_i = i - 1
+                 hist_file = self.im_files[prev_i]
+                 try:
+                    prev_img, _, _ = super().load_image(prev_i, rect_mode=False)
+                 except Exception:
+                    prev_img = current_img.copy()
+            else:
+                 # First frame of sequence, use current frame as history
+                 prev_img = current_img.copy()
             
-        return prev_img
+        return prev_img, hist_file
 
     def compute_homography(self, img1, img2):
         """
@@ -86,6 +121,9 @@ class VisDroneVideoDataset(YOLODataset):
         Note: The model needs H_{t -> t-1}, which is inverse of this if we map p_t to p_{t-1}.
         Let's stick to definition: p_{t-1} = H * p_t
         """
+        if not self.use_homography:
+            return torch.eye(3)
+
         # Resize for faster computation if images are too large
         scale = 0.5
         h, w = img1.shape[:2]
@@ -147,13 +185,32 @@ class VisDroneVideoDataset(YOLODataset):
         
         # Load history frame from previous index if available
         img_curr, _, _ = self.load_image(index, rect_mode=False)
-        img_hist = self.load_history(index, img_curr)
+        img_hist, hist_file = self.load_history(index, img_curr)
         
+        # Handle Synchronized Flip (Horizontal)
+        # We disabled random flip in super() to control it here
+        if self.augment and self.fliplr > 0.0 and np.random.uniform() < self.fliplr:
+            # Flip raw images for correct Homography calculation
+            img_curr = np.fliplr(img_curr)
+            img_hist = np.fliplr(img_hist)
+            
+            # Flip Current Image Tensor
+            # data['img'] is [C, H, W], flip last dim
+            data['img'] = torch.flip(data['img'], [-1])
+            
+            # Flip Bounding Boxes
+            # Format is normalized [cx, cy, w, h]
+            if 'bboxes' in data and len(data['bboxes']) > 0:
+                data['bboxes'][:, 0] = 1.0 - data['bboxes'][:, 0]
+                
+            # Note: Segments and Keypoints are not handled here yet, assuming object detection task
+            
         homography = self.compute_homography(img_curr, img_hist)
         ratio_pad = data.get('ratio_pad')
         target_size = tuple(int(dim) for dim in data['img'].shape[1:])  # (H, W)
         img_hist_tensor = self._prepare_history_tensor(img_hist, ratio_pad, target_size)
         data['history_img'] = img_hist_tensor
+        data['history_im_file'] = hist_file
         data['homography'] = homography
         
         return data
@@ -178,35 +235,22 @@ class VisDroneVideoDataset(YOLODataset):
             raise ValueError("History image cannot be None.")
 
         target_h, target_w = target_size
-        if ratio_pad is not None:
-            ratio, pad = ratio_pad
-            ratio = ratio.tolist() if hasattr(ratio, "tolist") else ratio
-            pad = pad.tolist() if hasattr(pad, "tolist") else pad
-            ratio_h, ratio_w = (ratio if isinstance(ratio, (list, tuple)) else (ratio, ratio))
-            pad_w, pad_h = (pad if isinstance(pad, (list, tuple)) else (0.0, 0.0))
+        
+        # Use LetterBox directly to ensure consistency with current frame augmentation
+        # We ignore ratio_pad because it might not contain padding info depending on BaseDataset implementation
+        letterbox = LetterBox(
+            new_shape=(target_h, target_w),
+            auto=self.rect,
+            scaleup=self.augment,
+            stride=self.stride,
+            center=True,
+        )
+        canvas = letterbox(image=img_hist)
+        if canvas.ndim == 2:
+            canvas = np.expand_dims(canvas, axis=-1)
 
-            new_w = max(int(round(img_hist.shape[1] * ratio_w)), 1)
-            new_h = max(int(round(img_hist.shape[0] * ratio_h)), 1)
-            resized = cv2.resize(img_hist, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-            canvas = np.full((target_h, target_w, resized.shape[2]), pad_value, dtype=resized.dtype)
-            left = int(round(pad_w))
-            top = int(round(pad_h))
-            right = min(left + new_w, target_w)
-            bottom = min(top + new_h, target_h)
-            canvas[top:bottom, left:right] = resized[: bottom - top, : right - left]
-        else:
-            # Fallback to standard letterbox if ratio/pad information is missing.
-            letterbox = LetterBox(
-                new_shape=(target_h, target_w),
-                auto=self.rect,
-                scaleup=self.augment,
-                stride=self.stride,
-                center=True,
-            )
-            canvas = letterbox(image=img_hist)
-            if canvas.ndim == 2:
-                canvas = np.expand_dims(canvas, axis=-1)
-
+        # Convert BGR to RGB to match the main image which is converted in Format transform
+        canvas = canvas[..., ::-1]
         img_hist_tensor = torch.from_numpy(canvas.transpose(2, 0, 1).copy())
         return img_hist_tensor
 
@@ -214,14 +258,21 @@ class VisDroneVideoDataset(YOLODataset):
         """Strong geometric augmentations break temporal alignment, so disallow them."""
         if not self.augment or self._hyp is None:
             return
+
+        # 1. Disable Mosaic & Mixup (Async geometric transform)
+        # Unless we implement a complex SyncMosaic, we must disable them for video consistency.
+        if hasattr(self._hyp, 'mosaic') and self._hyp.mosaic > 0:
+             LOGGER.warning(f"{self.prefix}Forcing mosaic=0.0 because it breaks video temporal alignment.")
+             self._hyp.mosaic = 0.0
+             
+        if hasattr(self._hyp, 'mixup') and self._hyp.mixup > 0:
+             LOGGER.warning(f"{self.prefix}Forcing mixup=0.0 because it breaks video temporal alignment.")
+             self._hyp.mixup = 0.0
+
+        # 2. Check other risky geometric augmentations
         risky = ("degrees", "translate", "scale", "shear", "perspective")
-        violations = {}
         for key in risky:
             value = getattr(self._hyp, key, 0.0)
             if abs(float(value)) > 1e-6:
-                violations[key] = value
-        if violations:
-            raise ValueError(
-                "VisDroneVideoDataset does not support strong geometric augmentations for video training. "
-                f"Please set the following hyper-parameters to 0: {violations}"
-            )
+                LOGGER.warning(f"{self.prefix}Forcing {key}=0.0 because it breaks video temporal alignment.")
+                setattr(self._hyp, key, 0.0)

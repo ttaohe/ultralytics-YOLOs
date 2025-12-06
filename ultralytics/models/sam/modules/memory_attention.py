@@ -76,10 +76,10 @@ class MemoryAttentionLayer(nn.Module):
         self.d_model = d_model
         self.dim_feedforward = dim_feedforward
         self.dropout_value = dropout
-        self.self_attn = RoPEAttention(embedding_dim=256, num_heads=1, downsample_rate=1)
+        self.self_attn = RoPEAttention(embedding_dim=d_model, num_heads=1, downsample_rate=1)
         self.cross_attn_image = RoPEAttention(
             rope_k_repeat=True,
-            embedding_dim=256,
+            embedding_dim=d_model,
             num_heads=1,
             downsample_rate=1,
             kv_in_dim=64,
@@ -277,18 +277,25 @@ class MemoryAttention(nn.Module):
             assert len(curr) == len(curr_pos) == 1
             curr, curr_pos = curr[0], curr_pos[0]
 
-        assert curr.shape[1] == memory.shape[1], "Batch size must be the same for curr and memory"
+        if self.batch_first:
+            if curr.shape[0] != memory.shape[0]:
+                print(f"ERROR: batch_first=True, curr={curr.shape}, memory={memory.shape}")
+            assert curr.shape[0] == memory.shape[0], "Batch size must be the same for curr and memory"
+        else:
+            if curr.shape[1] != memory.shape[1]:
+                print(f"ERROR: batch_first=False, curr={curr.shape}, memory={memory.shape}")
+            assert curr.shape[1] == memory.shape[1], "Batch size must be the same for curr and memory"
 
         output = curr
         if self.pos_enc_at_input and curr_pos is not None:
             output = output + 0.1 * curr_pos
 
-        if self.batch_first:
+        if not self.batch_first:
             # Convert to batch first
             output = output.transpose(0, 1)
-            curr_pos = curr_pos.transpose(0, 1)
+            curr_pos = curr_pos.transpose(0, 1) if curr_pos is not None else None
             memory = memory.transpose(0, 1)
-            memory_pos = memory_pos.transpose(0, 1)
+            memory_pos = memory_pos.transpose(0, 1) if memory_pos is not None else None
 
         for layer in self.layers:
             kwds = {}
@@ -304,9 +311,8 @@ class MemoryAttention(nn.Module):
             )
         normed_output = self.norm(output)
 
-        if self.batch_first:
+        if not self.batch_first:
             # Convert back to seq first
             normed_output = normed_output.transpose(0, 1)
-            curr_pos = curr_pos.transpose(0, 1)
 
         return normed_output

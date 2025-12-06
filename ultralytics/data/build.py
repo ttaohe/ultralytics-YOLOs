@@ -28,7 +28,7 @@ from ultralytics.data.loaders import (
     autocast_list,
 )
 from ultralytics.data.utils import IMG_FORMATS, VID_FORMATS
-from ultralytics.utils import RANK, colorstr
+from ultralytics.utils import LOGGER, RANK, colorstr
 from ultralytics.utils.checks import check_file
 from ultralytics.utils.torch_utils import TORCH_2_0
 
@@ -118,6 +118,12 @@ def seed_worker(worker_id: int):  # noqa
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+    try:
+        # Debug: log each DataLoader worker process
+        LOGGER.debug(f"[DL-WORKER] worker_id={worker_id} pid={os.getpid()} RANK={RANK}")
+    except Exception:
+        # Avoid训练中断，任何日志失败都直接忽略
+        pass
 
 
 def build_yolo_dataset(
@@ -211,6 +217,17 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
     batch = min(batch, len(dataset))
     nd = torch.cuda.device_count()  # number of CUDA devices
     nw = min(os.cpu_count() // max(nd, 1), workers)  # number of workers
+
+    # Debug: log dataloader creation and worker count per process / rank
+    try:
+        LOGGER.debug(
+            f"[DL] pid={os.getpid()} RANK={RANK} rank_arg={rank} "
+            f"dataset_len={len(dataset)} batch={batch} "
+            f"cfg_workers={workers} -> num_workers={nw}"
+        )
+    except Exception:
+        # Debug 日志失败不影响训练
+        pass
     sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)

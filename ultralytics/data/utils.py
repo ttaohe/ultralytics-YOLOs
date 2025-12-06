@@ -17,7 +17,6 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
-from ultralytics.nn.autobackend import check_class_names
 from ultralytics.utils import (
     DATASETS_DIR,
     LOGGER,
@@ -432,6 +431,7 @@ def check_det_dataset(dataset: str, autodownload: bool = True) -> dict[str, Any]
     else:
         data["nc"] = len(data["names"])
 
+    from ultralytics.nn.autobackend import check_class_names
     data["names"] = check_class_names(data["names"])
     data["channels"] = data.get("channels", 3)  # get image channels, default to 3
 

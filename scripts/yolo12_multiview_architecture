@@ -1,0 +1,206 @@
+// YOLO12 Architecture
+digraph {
+	rankdir=TB
+	compound=true
+	input [label="Input
+(1, 2, 3, 640, 640)" fillcolor=lightblue shape=ellipse style=filled]
+	0 [label="Layer 0: Conv
+k=(3, 3), s=(2, 2), c=16
+In: (2, 3, 640, 640)
+Out: (2, 16, 320, 320)" fillcolor=white shape=box style=filled]
+	input -> 0
+	1 [label="Layer 1: Conv
+k=(3, 3), s=(2, 2), c=32
+In: (2, 16, 320, 320)
+Out: (2, 32, 160, 160)" fillcolor=white shape=box style=filled]
+	0 -> 1
+	2 [label="Layer 2: C3k2
+c_out=64
+In: (2, 32, 160, 160)
+Out: (2, 64, 160, 160)" fillcolor=white shape=box style=filled]
+	1 -> 2
+	3 [label="Layer 3: Conv
+k=(3, 3), s=(2, 2), c=64
+In: (2, 64, 160, 160)
+Out: (2, 64, 80, 80)" fillcolor=white shape=box style=filled]
+	2 -> 3
+	4 [label="Layer 4: C3k2
+c_out=128
+In: (2, 64, 80, 80)
+Out: (2, 128, 80, 80)" fillcolor=white shape=box style=filled]
+	3 -> 4
+	5 [label="Layer 5: Conv
+k=(3, 3), s=(2, 2), c=128
+In: (2, 128, 80, 80)
+Out: (2, 128, 40, 40)" fillcolor=white shape=box style=filled]
+	4 -> 5
+	6 [label="Layer 6: A2C2f
+c_out=128
+In: (2, 128, 40, 40)
+Out: (2, 128, 40, 40)" fillcolor=white shape=box style=filled]
+	5 -> 6
+	7 [label="Layer 7: Conv
+k=(3, 3), s=(2, 2), c=256
+In: (2, 128, 40, 40)
+Out: (2, 256, 20, 20)" fillcolor=white shape=box style=filled]
+	6 -> 7
+	8 [label="Layer 8: A2C2f
+c_out=256
+In: (2, 256, 20, 20)
+Out: (2, 256, 20, 20)" fillcolor=white shape=box style=filled]
+	7 -> 8
+	9 [label="Layer 9: Upsample
+In: (2, 256, 20, 20)
+Out: (2, 256, 40, 40)" fillcolor=white shape=box style=filled]
+	8 -> 9
+	10 [label="Layer 10: Concat
+In: Complex
+Out: (2, 384, 40, 40)" fillcolor=white shape=box style=filled]
+	9 -> 10
+	6 -> 10
+	11 [label="Layer 11: A2C2f
+c_out=128
+In: (2, 384, 40, 40)
+Out: (2, 128, 40, 40)" fillcolor=white shape=box style=filled]
+	10 -> 11
+	12 [label="Layer 12: Upsample
+In: (2, 128, 40, 40)
+Out: (2, 128, 80, 80)" fillcolor=white shape=box style=filled]
+	11 -> 12
+	13 [label="Layer 13: Concat
+In: Complex
+Out: (2, 256, 80, 80)" fillcolor=white shape=box style=filled]
+	12 -> 13
+	4 -> 13
+	14 [label="Layer 14: A2C2f
+c_out=64
+In: (2, 256, 80, 80)
+Out: (2, 64, 80, 80)" fillcolor=white shape=box style=filled]
+	13 -> 14
+	subgraph cluster_15 {
+		label="Layer 15: MultiviewFusionBlock
+hidden_dim=256, c1=64, c2=64
+In: (2, 64, 80, 80)
+Out: (2, 64, 80, 80)"
+		color=lightyellow style=filled
+		"15_in" [label="Input Feats" shape=point]
+		"15_geo_pe" [label="GeoPE
+(Coords)" fillcolor=lightgreen shape=box style=filled]
+		"15_q_proj" [label="Q Proj" fillcolor=white shape=box style=filled]
+		"15_k_proj" [label="K Proj" fillcolor=white shape=box style=filled]
+		"15_v_proj" [label="V Proj" fillcolor=white shape=box style=filled]
+		"15_attn" [label="Cross-View
+Attention" fillcolor=orange shape=diamond style=filled]
+		"15_out_proj" [label="Out Proj" fillcolor=white shape=box style=filled]
+		"15_add" [label="Add
+(Residual)" fillcolor=white shape=circle style=filled]
+		"15_in" -> "15_q_proj"
+		"15_in" -> "15_k_proj"
+		"15_in" -> "15_v_proj"
+		"15_in" -> "15_add" [label=skip style=dashed]
+		"15_geo_pe" -> "15_q_proj" [label="add PE" style=dotted]
+		"15_geo_pe" -> "15_k_proj" [label="add PE" style=dotted]
+		"15_q_proj" -> "15_attn" [label=Q]
+		"15_k_proj" -> "15_attn" [label=K]
+		"15_v_proj" -> "15_attn" [label=V]
+		"15_attn" -> "15_out_proj"
+		"15_out_proj" -> "15_add"
+	}
+	14 -> "15_in"
+	16 [label="Layer 16: Conv
+k=(3, 3), s=(2, 2), c=64
+In: (2, 64, 80, 80)
+Out: (2, 64, 40, 40)" fillcolor=white shape=box style=filled]
+	"15_add" -> 16
+	17 [label="Layer 17: Concat
+In: Complex
+Out: (2, 192, 40, 40)" fillcolor=white shape=box style=filled]
+	16 -> 17
+	11 -> 17
+	18 [label="Layer 18: A2C2f
+c_out=128
+In: (2, 192, 40, 40)
+Out: (2, 128, 40, 40)" fillcolor=white shape=box style=filled]
+	17 -> 18
+	subgraph cluster_19 {
+		label="Layer 19: MultiviewFusionBlock
+hidden_dim=256, c1=128, c2=128
+In: (2, 128, 40, 40)
+Out: (2, 128, 40, 40)"
+		color=lightyellow style=filled
+		"19_in" [label="Input Feats" shape=point]
+		"19_geo_pe" [label="GeoPE
+(Coords)" fillcolor=lightgreen shape=box style=filled]
+		"19_q_proj" [label="Q Proj" fillcolor=white shape=box style=filled]
+		"19_k_proj" [label="K Proj" fillcolor=white shape=box style=filled]
+		"19_v_proj" [label="V Proj" fillcolor=white shape=box style=filled]
+		"19_attn" [label="Cross-View
+Attention" fillcolor=orange shape=diamond style=filled]
+		"19_out_proj" [label="Out Proj" fillcolor=white shape=box style=filled]
+		"19_add" [label="Add
+(Residual)" fillcolor=white shape=circle style=filled]
+		"19_in" -> "19_q_proj"
+		"19_in" -> "19_k_proj"
+		"19_in" -> "19_v_proj"
+		"19_in" -> "19_add" [label=skip style=dashed]
+		"19_geo_pe" -> "19_q_proj" [label="add PE" style=dotted]
+		"19_geo_pe" -> "19_k_proj" [label="add PE" style=dotted]
+		"19_q_proj" -> "19_attn" [label=Q]
+		"19_k_proj" -> "19_attn" [label=K]
+		"19_v_proj" -> "19_attn" [label=V]
+		"19_attn" -> "19_out_proj"
+		"19_out_proj" -> "19_add"
+	}
+	18 -> "19_in"
+	20 [label="Layer 20: Conv
+k=(3, 3), s=(2, 2), c=128
+In: (2, 128, 40, 40)
+Out: (2, 128, 20, 20)" fillcolor=white shape=box style=filled]
+	"19_add" -> 20
+	21 [label="Layer 21: Concat
+In: Complex
+Out: (2, 384, 20, 20)" fillcolor=white shape=box style=filled]
+	20 -> 21
+	8 -> 21
+	22 [label="Layer 22: C3k2
+c_out=256
+In: (2, 384, 20, 20)
+Out: (2, 256, 20, 20)" fillcolor=white shape=box style=filled]
+	21 -> 22
+	subgraph cluster_23 {
+		label="Layer 23: MultiviewFusionBlock
+hidden_dim=256, c1=256, c2=256
+In: (2, 256, 20, 20)
+Out: (2, 256, 20, 20)"
+		color=lightyellow style=filled
+		"23_in" [label="Input Feats" shape=point]
+		"23_geo_pe" [label="GeoPE
+(Coords)" fillcolor=lightgreen shape=box style=filled]
+		"23_q_proj" [label="Q Proj" fillcolor=white shape=box style=filled]
+		"23_k_proj" [label="K Proj" fillcolor=white shape=box style=filled]
+		"23_v_proj" [label="V Proj" fillcolor=white shape=box style=filled]
+		"23_attn" [label="Cross-View
+Attention" fillcolor=orange shape=diamond style=filled]
+		"23_out_proj" [label="Out Proj" fillcolor=white shape=box style=filled]
+		"23_add" [label="Add
+(Residual)" fillcolor=white shape=circle style=filled]
+		"23_in" -> "23_q_proj"
+		"23_in" -> "23_k_proj"
+		"23_in" -> "23_v_proj"
+		"23_in" -> "23_add" [label=skip style=dashed]
+		"23_geo_pe" -> "23_q_proj" [label="add PE" style=dotted]
+		"23_geo_pe" -> "23_k_proj" [label="add PE" style=dotted]
+		"23_q_proj" -> "23_attn" [label=Q]
+		"23_k_proj" -> "23_attn" [label=K]
+		"23_v_proj" -> "23_attn" [label=V]
+		"23_attn" -> "23_out_proj"
+		"23_out_proj" -> "23_add"
+	}
+	22 -> "23_in"
+	24 [label="Layer 24: Detect
+In: Complex
+Out: [(2, 144, 80, 80), (2, 144, 40, 40), (2, 144, 20, 20)]" fillcolor=white shape=box style=filled]
+	"15_add" -> 24
+	"19_add" -> 24
+	"23_add" -> 24
+}

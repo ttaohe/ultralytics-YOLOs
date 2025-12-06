@@ -458,7 +458,10 @@ class RoPEAttention(Attention):
         w = h = math.sqrt(q.shape[-2])
         self.freqs_cis = self.freqs_cis.to(q.device)
         if self.freqs_cis.shape[0] != q.shape[-2]:
-            self.freqs_cis = self.compute_cis(end_x=w, end_y=h).to(q.device)
+            if w.is_integer():
+                self.freqs_cis = self.compute_cis(end_x=int(w), end_y=int(h)).to(q.device)
+            else:
+                self.freqs_cis = self.compute_cis(end_x=q.shape[-2], end_y=1).to(q.device)
         if q.shape[-2] != k.shape[-2]:
             assert self.rope_k_repeat
 

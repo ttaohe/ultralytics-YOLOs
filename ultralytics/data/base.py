@@ -246,7 +246,21 @@ class BaseDataset(Dataset):
                     w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
                     im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
             elif not (h0 == w0 == self.imgsz):  # resize by stretching image to square imgsz
-                im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+                # For video training consistency, we might prefer letterbox-style resizing (with gray borders)
+                # instead of stretching. However, standard YOLO training expects filled images.
+                # If we change this, we MUST ensure transforms handle padded images correctly.
+                # But here, let's assume user wants proportional resize even if not rect.
+                # Standard logic: im = cv2.resize(im, (self.imgsz, self.imgsz), interpolation=cv2.INTER_LINEAR)
+                
+                # NEW LOGIC: Use LetterBox logic (resize long side) even if not rect
+                # This will leave gray borders, but transforms (e.g. LetterBox) will pad it later.
+                # Wait, transforms run AFTER this. If we return a smaller image here,
+                # transforms.LetterBox will pad it to imgsz.
+                r = self.imgsz / max(h0, w0)
+                if r != 1:
+                    w, h = (min(math.ceil(w0 * r), self.imgsz), min(math.ceil(h0 * r), self.imgsz))
+                    im = cv2.resize(im, (w, h), interpolation=cv2.INTER_LINEAR)
+
             if im.ndim == 2:
                 im = im[..., None]
 

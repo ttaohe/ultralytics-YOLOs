@@ -70,7 +70,6 @@ from ultralytics.nn.modules import (
     YOLOEDetect,
     YOLOESegment,
     v10Detect,
-    YOLOMemoryAttention,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -141,7 +140,7 @@ class BaseModel(torch.nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, augment=False, embed=None, coords=None):
         """
         Perform a forward pass through the network.
 
@@ -151,15 +150,16 @@ class BaseModel(torch.nn.Module):
             visualize (bool): Save the feature maps of the model if True.
             augment (bool): Augment image during prediction.
             embed (list, optional): A list of feature vectors/embeddings to return.
+            coords (torch.Tensor, optional): Coordinates for multiview fusion.
 
         Returns:
             (torch.Tensor): The last output of the model.
         """
         if augment:
             return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+        return self._predict_once(x, profile, visualize, embed, coords=coords)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+    def _predict_once(self, x, profile=False, visualize=False, embed=None, coords=None):
         """
         Perform a forward pass through the network.
 
@@ -168,10 +168,12 @@ class BaseModel(torch.nn.Module):
             profile (bool): Print the computation time of each layer if True.
             visualize (bool): Save the feature maps of the model if True.
             embed (list, optional): A list of feature vectors/embeddings to return.
+            coords (torch.Tensor, optional): Coordinates for multiview fusion.
 
         Returns:
             (torch.Tensor): The last output of the model.
         """
+        from ultralytics.nn.modules.multiview_block import MultiviewFusionBlock
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
@@ -180,7 +182,12 @@ class BaseModel(torch.nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+            
+            if isinstance(m, MultiviewFusionBlock):
+                x = m(x, coords=coords)
+            else:
+                x = m(x)  # run
+            
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -338,7 +345,7 @@ class BaseModel(torch.nn.Module):
             self.criterion = self.init_criterion()
 
         if preds is None:
-            preds = self.forward(batch["img"])
+            preds = self.forward(batch["img"], coords=batch.get("coords"))
         return self.criterion(preds, batch)
 
     def init_criterion(self):
@@ -1526,6 +1533,11 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
 
 
 def parse_model(d, ch, verbose=True):
+    from ultralytics.nn.modules.video_block import YOLOMemoryAttention
+    from ultralytics.nn.modules.multiview_block import MultiviewFusionBlock
+    # Inject into globals so parse_model can find them via globals()[m]
+    globals()['YOLOMemoryAttention'] = YOLOMemoryAttention
+    globals()['MultiviewFusionBlock'] = MultiviewFusionBlock
     """
     Parse a YOLO model.yaml dictionary into a PyTorch model.
 
@@ -1632,7 +1644,7 @@ def parse_model(d, ch, verbose=True):
                 with contextlib.suppress(ValueError):
                     args[j] = locals()[a] if a in locals() else ast.literal_eval(a)
         n = n_ = max(round(n * depth), 1) if n > 1 else n  # depth gain
-        if m in base_modules:
+        if m in base_modules or m is MultiviewFusionBlock:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 c2 = make_divisible(min(c2, max_channels) * width, 8)
