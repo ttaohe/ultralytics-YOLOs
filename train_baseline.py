@@ -41,6 +41,9 @@ def train():
         # translate=0.0,
         # shear=0.0,
         # perspective=0.0, 
+        
+        # 优化：开启 Baseline Mode，让 Dataset 跳过历史帧加载 (4x IO -> 1x IO)
+        baseline_mode=True,
     )
     
     # 加载官方 YOLO12n 模型 (假设存在，或者使用 yolo12n.yaml)

@@ -24,7 +24,8 @@ class VisDroneVideoDataset(YOLODataset):
         **kwargs,
     ):
         self._hyp = kwargs.get("hyp")
-        self.use_homography = use_homography
+        self.baseline_mode = kwargs.get("baseline_mode", False) or getattr(self._hyp, "baseline_mode", False)
+        self.use_homography = use_homography and not self.baseline_mode
         # Random window crop for high-res VisDrone frames (applied before transforms)
         self.random_crop_size = int(random_crop_size or 0)
         self.random_crop_prob = float(random_crop_prob or 0.0)
@@ -95,6 +96,18 @@ class VisDroneVideoDataset(YOLODataset):
                 if self.cache != "ram":
                     self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
         
+        if self.augment:
+            self.buffer.append(index)
+            # Maintain buffer size
+            if len(self.buffer) >= self.max_buffer_length:
+                j = self.buffer.pop(0)
+                if self.cache != "ram":
+                    self.ims[j], self.im_hw0[j], self.im_hw[j] = None, None, None
+        
+        # FIX: If baseline_mode is On, skip history loading entirely (Speed up)
+        if self.baseline_mode:
+            return label
+
         # 2. Load History Image
         # Note: 'img' in label is already loaded (and potentially cropped if random_crop_size>0)
         # But super().get_image_and_label might have resized it? 
@@ -309,7 +322,7 @@ class VisDroneVideoDataset(YOLODataset):
         img_stack = data['img'] # Tensor [6, H, W]
         
         # Safety check for Channel Stacking
-        if img_stack.shape[0] == 6:
+        if img_stack.shape[0] == 6 and not self.baseline_mode:
             # Split stack
             img_curr = img_stack[:3]    # [3, H, W]
             img_hist = img_stack[3:]    # [3, H, W]
@@ -354,6 +367,9 @@ class VisDroneVideoDataset(YOLODataset):
                  # Mosaic preserves custom keys in `final_labels` from the main image (index 0).
                  pass
 
+        elif self.baseline_mode and img_stack.shape[0] == 3:
+            # Baseline Mode: Standard 3-channel input is expected (History skipped).
+            pass
         else:
             # Fallback for unexpected case (e.g. validation set might not stack?)
             # Or if Mosaic failed to stack.
