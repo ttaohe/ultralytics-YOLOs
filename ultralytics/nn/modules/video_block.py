@@ -166,6 +166,7 @@ class YOLOMemoryAttention(nn.Module):
             if isinstance(layer.cross_attn_image, YOLORoPEAttention):
                 layer.cross_attn_image.set_spatial_shape(H, W)
 
+
         # Process input
         # Note: We use proj_in for the 'curr' input to attention
         x_proj = self.proj_in(x)
@@ -263,8 +264,8 @@ class YOLOMemoryAttention(nn.Module):
                 # However, cross-attn will run.
                 memory = curr
             else:
-                # Check if batch size matches
-                if self.memory_bank[0].shape[0] != curr.shape[0]:
+                # Check if batch size or token count matches
+                if self.memory_bank[0].shape[0] != curr.shape[0] or self.memory_bank[0].shape[1] != curr.shape[1]:
                     self.memory_bank = []
                     memory = curr
                 else:

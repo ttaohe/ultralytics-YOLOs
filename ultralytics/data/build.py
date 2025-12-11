@@ -144,6 +144,14 @@ def build_yolo_dataset(
     else:
         dataset = YOLODataset
 
+    # Extract random_crop parameters if present (for baseline training support)
+    random_crop_size = getattr(cfg, "random_crop_size", 0)
+    random_crop_prob = getattr(cfg, "random_crop_prob", 0.0)
+    
+    # If random_crop_size is not set or 0, default to imgsz (same logic as video trainer)
+    if random_crop_size <= 0:
+        random_crop_size = cfg.imgsz
+    
     return dataset(
         img_path=img_path,
         imgsz=cfg.imgsz,
@@ -160,6 +168,9 @@ def build_yolo_dataset(
         classes=cfg.classes,
         data=data,
         fraction=cfg.fraction if mode == "train" else 1.0,
+        # Pass random_crop parameters if dataset supports them
+        random_crop_size=random_crop_size if mode == "train" else 0,
+        random_crop_prob=random_crop_prob if mode == "train" else 0.0,
     )
 
 

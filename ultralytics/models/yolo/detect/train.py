@@ -60,9 +60,31 @@ class DetectionTrainer(BaseTrainer):
         Args:
             cfg (dict, optional): Default configuration dictionary containing training parameters.
             overrides (dict, optional): Dictionary of parameter overrides for the default configuration.
+                Can include:
+                - random_crop_size: int (optional, defaults to imgsz)
+                - random_crop_prob: float (optional, default 0.0)
+                - val_imgsz: int (Optional: validation image size, e.g., 1280)
             _callbacks (list, optional): List of callback functions to be executed during training.
         """
+        # Extract custom random_crop parameters before calling super().__init__
+        # This prevents them from being validated by the default config system
+        if overrides is None:
+            overrides = {}
+        
+        random_crop_size = overrides.pop("random_crop_size", 0)
+        random_crop_prob = overrides.pop("random_crop_prob", 0.0)
+        val_imgsz = overrides.pop("val_imgsz", 0) # [EXPERIMENTAL] High-res validation support
+        
+        # Call parent initializer with cleaned overrides
         super().__init__(cfg, overrides, _callbacks)
+        
+        # Store random_crop parameters on args (for build_yolo_dataset to access)
+        # If random_crop_size is not set or 0, default to imgsz
+        if random_crop_size <= 0:
+            random_crop_size = self.args.imgsz
+        self.args.random_crop_size = int(random_crop_size)
+        self.args.random_crop_prob = float(random_crop_prob or 0.0)
+        self.val_imgsz = int(val_imgsz) # Store val_imgsz
 
     def build_dataset(self, img_path: str, mode: str = "train", batch: int | None = None):
         """
@@ -77,6 +99,8 @@ class DetectionTrainer(BaseTrainer):
             (Dataset): YOLO dataset object configured for the specified mode.
         """
         gs = max(int(unwrap_model(self.model).stride.max() if self.model else 0), 32)
+        # Pass random_crop parameters via self.args (which is passed as cfg)
+        # build_yolo_dataset extracts them from cfg
         return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs)
 
     def get_dataloader(self, dataset_path: str, batch_size: int = 16, rank: int = 0, mode: str = "train"):
@@ -93,20 +117,32 @@ class DetectionTrainer(BaseTrainer):
             (DataLoader): PyTorch dataloader object.
         """
         assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
-        with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
-            dataset = self.build_dataset(dataset_path, mode, batch_size)
-        shuffle = mode == "train"
-        if getattr(dataset, "rect", False) and shuffle:
-            LOGGER.warning("'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
-            shuffle = False
-        return build_dataloader(
-            dataset,
-            batch=batch_size,
-            workers=self.args.workers if mode == "train" else self.args.workers * 2,
-            shuffle=shuffle,
-            rank=rank,
-            drop_last=self.args.compile and mode == "train",
-        )
+        
+        # [EXPERIMENTAL] High-res validation support
+        # If mode is 'val' and val_imgsz is set, temporarily swap self.args.imgsz
+        original_imgsz = self.args.imgsz
+        if mode == "val" and self.val_imgsz > 0:
+            self.args.imgsz = self.val_imgsz
+            LOGGER.info(f"Using high-resolution validation with imgsz={self.val_imgsz}")
+            
+        try:
+            with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
+                dataset = self.build_dataset(dataset_path, mode, batch_size)
+            shuffle = mode == "train"
+            if getattr(dataset, "rect", False) and shuffle:
+                LOGGER.warning("'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
+                shuffle = False
+            return build_dataloader(
+                dataset,
+                batch=batch_size,
+                workers=self.args.workers if mode == "train" else self.args.workers * 2,
+                shuffle=shuffle,
+                rank=rank,
+                drop_last=self.args.compile and mode == "train",
+            )
+        finally:
+            # Restore original imgsz
+            self.args.imgsz = original_imgsz
 
     def preprocess_batch(self, batch: dict) -> dict:
         """
@@ -169,8 +205,19 @@ class DetectionTrainer(BaseTrainer):
     def get_validator(self):
         """Return a DetectionValidator for YOLO model validation."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        # Remove custom random_crop parameters from args to avoid validation errors
+        args = copy(self.args)
+        
+        # [EXPERIMENTAL] High-res validation support
+        if self.val_imgsz > 0:
+            args.imgsz = self.val_imgsz
+            
+        if hasattr(args, 'random_crop_size'):
+            delattr(args, 'random_crop_size')
+        if hasattr(args, 'random_crop_prob'):
+            delattr(args, 'random_crop_prob')
         return yolo.detect.DetectionValidator(
-            self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
+            self.test_loader, save_dir=self.save_dir, args=args, _callbacks=self.callbacks
         )
 
     def label_loss_items(self, loss_items: list[float] | None = None, prefix: str = "train"):

@@ -4,6 +4,9 @@ import os
 import cv2
 # cv2.setUseOptimized(False)  # 可选：禁用特定优化以确保纯 CPU 运行
 
+import torch
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 import warnings
 from ultralytics import YOLO
 
@@ -15,17 +18,25 @@ def train():
     args = dict(
         data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
         epochs=100,
-        imgsz=1280, 
-        batch=4,   
+        imgsz=640, 
+        batch=8,   
         project='runs/train-baseline',
         name='yolo12n-baseline',
-        device='0,3',
-        workers=2,  # Reduce workers to avoid "ancdata" error (file descriptor limit)
+        device='0',
+        workers=4,  # Reduce workers to avoid "ancdata" error (file descriptor limit)
+        # random_crop_size 默认等于 imgsz，如果原图足够大，直接从原图 crop（不 resize）
+        # 如果原图不够大，会先 resize 到 imgsz
+        random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
+        random_crop_prob=1.0,  # 1.0 = Super Mosaic Strategy
+
+        
+        # [EXPERIMENTAL] 验证时使用高分辨率 (1280)，训练时使用低分辨率 (640)
+        val_imgsz=1920,
         
         # 保持与 Video 训练完全一致的增强参数
-        # mosaic=0.0,
+        mosaic=1.0, # 开启 Super Mosaic
         # mixup=0.0,
-        # scale=0.0,
+        scale=0.5, # 开启 Scale 缩放 (范围 0.5-1.5)
         # degrees=0.0,
         # translate=0.0,
         # shear=0.0,
@@ -35,7 +46,7 @@ def train():
     # 加载官方 YOLO12n 模型 (假设存在，或者使用 yolo12n.yaml)
     # 注意：如果 yolo12n.pt 不存在，会自动下载。
     # 如果你想从 yaml 重新初始化，请使用 'yolo12n.yaml'
-    model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/v10/yolov10l-p2-no-p5.yaml') 
+    model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/12/yolo12-baseline-p2.yaml') 
     
     model.train(**args)
 

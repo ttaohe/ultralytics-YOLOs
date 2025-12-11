@@ -72,13 +72,16 @@ class YOLODataset(BaseDataset):
         >>> dataset.get_labels()
     """
 
-    def __init__(self, *args, data: dict | None = None, task: str = "detect", **kwargs):
+    def __init__(self, *args, data: dict | None = None, task: str = "detect", 
+                 random_crop_size: int = 0, random_crop_prob: float = 0.0, **kwargs):
         """
         Initialize the YOLODataset.
 
         Args:
             data (dict, optional): Dataset configuration dictionary.
             task (str): Task type, one of 'detect', 'segment', 'pose', or 'obb'.
+            random_crop_size (int): Size for random crop augmentation. If 0, no random crop.
+            random_crop_prob (float): Probability of applying random crop.
             *args (Any): Additional positional arguments for the parent class.
             **kwargs (Any): Additional keyword arguments for the parent class.
         """
@@ -86,6 +89,9 @@ class YOLODataset(BaseDataset):
         self.use_keypoints = task == "pose"
         self.use_obb = task == "obb"
         self.data = data
+        # Random crop support (similar to VisDroneVideoDataset)
+        self.random_crop_size = int(random_crop_size or 0)
+        self.random_crop_prob = float(random_crop_prob or 0.0)
         assert not (self.use_segments and self.use_keypoints), "Can not use both segments and keypoints."
         super().__init__(*args, channels=self.data.get("channels", 3), **kwargs)
 
@@ -251,6 +257,160 @@ class YOLODataset(BaseDataset):
         hyp.mixup = 0.0
         hyp.cutmix = 0.0
         self.transforms = self.build_transforms(hyp)
+
+    def get_image_and_label(self, index: int) -> dict:
+        """
+        Override BaseDataset.get_image_and_label to support random crop from original image.
+        
+        If random_crop_size is enabled and original image is large enough, crop directly from 
+        original image without resizing to preserve small target pixels.
+        """
+        # Check if we should crop directly from original image
+        if (self.augment and self.random_crop_size > 0 and self.random_crop_prob > 0.0 and 
+            np.random.rand() <= self.random_crop_prob):
+            
+            # Load original image without resizing
+            from copy import deepcopy
+            from ultralytics.utils.patches import imread
+            
+            label = deepcopy(self.labels[index])
+            label.pop("shape", None)
+            
+            # Load original image
+            f = self.im_files[index]
+            img_ori = imread(f, flags=self.cv2_flag)
+            if img_ori is None:
+                raise FileNotFoundError(f"Image Not Found {f}")
+            
+            ori_h, ori_w = img_ori.shape[:2]
+            crop = self.random_crop_size
+            
+            # Check if original image is large enough to crop
+            if ori_h >= crop and ori_w >= crop:
+                # Crop directly from original image
+                y0 = np.random.randint(0, ori_h - crop + 1)
+                x0 = np.random.randint(0, ori_w - crop + 1)
+                y1, x1 = y0 + crop, x0 + crop
+                
+                img_crop = img_ori[y0:y1, x0:x1]
+                
+                # Record crop window in original coordinates
+                label["crop_window_ori"] = (int(x0), int(y0), int(x1), int(y1))
+                
+                # Update label with cropped image
+                label["img"] = img_crop
+                label["ori_shape"] = (ori_h, ori_w)
+                label["resized_shape"] = (crop, crop)
+                label["ratio_pad"] = (crop / ori_h, crop / ori_w)
+                
+                # First convert bboxes to instances (if needed)
+                label = self.update_labels_info(label)
+                
+                # Update instances: convert to pixel coordinates, crop, then normalize
+                instances = label.get("instances", None)
+                if instances is not None:
+                    instances.convert_bbox(format="xyxy")
+                    # Denormalize to original image coordinates
+                    instances.denormalize(ori_w, ori_h)
+                    
+                    # Translate crop window to (0,0)
+                    instances.add_padding(-x0, -y0)
+                    
+                    # Clip to crop window and remove zero area boxes
+                    instances.clip(crop, crop)
+                    good = instances.remove_zero_area_boxes()
+                    
+                    # Update cls array if exists
+                    if "cls" in label:
+                        label["cls"] = label["cls"][good]
+                    
+                    # Normalize to crop size
+                    instances.normalize(crop, crop)
+                    label["instances"] = instances
+                
+                return label
+        
+        # If not cropping from original, use standard pipeline
+        label = super().get_image_and_label(index)
+        label = self._maybe_random_window_crop_label(label)
+        
+        # Ensure keys exist for collate_fn consistency
+        if "crop_window_ori" not in label:
+            label["crop_window_ori"] = (0, 0, 0, 0)
+        if "crop_window_resized" not in label:
+            label["crop_window_resized"] = (0, 0, 0, 0)
+            
+        return label
+
+    def _maybe_random_window_crop_label(self, label: dict) -> dict:
+        """
+        Optionally apply a fixed-size random crop on the current frame before transforms.
+
+        This operates on the resized image from BaseDataset.load_image (rect logic already applied),
+        and synchronously updates label['instances'] so that boxes remain aligned.
+        """
+        if not self.augment or self.random_crop_size <= 0 or self.random_crop_prob <= 0.0:
+            return label
+
+        if np.random.rand() > self.random_crop_prob:
+            return label
+
+        img = label.get("img", None)
+        instances = label.get("instances", None)
+        if img is None or instances is None:
+            return label
+
+        h, w = img.shape[:2]
+        crop = self.random_crop_size
+
+        # If current size is smaller than crop, skip
+        if h <= crop or w <= crop:
+            return label
+
+        # Random crop window on resized image
+        y0 = np.random.randint(0, h - crop + 1)
+        x0 = np.random.randint(0, w - crop + 1)
+        y1, x1 = y0 + crop, x0 + crop
+
+        # Crop image
+        img_crop = img[y0:y1, x0:x1]
+
+        # Record window in resized coordinates
+        label["crop_window_resized"] = (x0, y0, x1, y1)
+
+        # Calculate window in original coordinates (for history sync or debugging)
+        ori_h, ori_w = label.get("ori_shape", (h, w))
+        res_h, res_w = label.get("resized_shape", (h, w))
+        r_h = res_h / ori_h
+        r_w = res_w / ori_w
+        r = (r_h + r_w) / 2.0 if (ori_h > 0 and ori_w > 0) else 1.0
+
+        x0_ori = x0 / r
+        y0_ori = y0 / r
+        x1_ori = x1 / r
+        y1_ori = y1 / r
+        # Convert to integers
+        label["crop_window_ori"] = (int(np.round(x0_ori)), int(np.round(y0_ori)), 
+                                    int(np.round(x1_ori)), int(np.round(y1_ori)))
+
+        # Update instances
+        instances.convert_bbox(format="xyxy")
+        instances.denormalize(res_w, res_h)
+        instances.add_padding(-x0, -y0)
+        instances.clip(crop, crop)
+        good = instances.remove_zero_area_boxes()
+        
+        if "cls" in label:
+            label["cls"] = label["cls"][good]
+
+        instances.normalize(crop, crop)
+        label["instances"] = instances
+
+        # Update label info
+        label["img"] = img_crop
+        label["resized_shape"] = (crop, crop)
+
+        return label
 
     def update_labels_info(self, label: dict) -> dict:
         """
@@ -806,10 +966,9 @@ class ClassificationDataset:
             im = np.load(fn)
         else:  # read image
             im = cv2.imread(f)  # BGR
-        # Convert NumPy array to PIL image
-        im = Image.fromarray(cv2.cvtColor(im, cv2.COLOR_BGR2RGB))
-        sample = self.torch_transforms(im)
-        return {"img": sample, "cls": j}
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        """Return transformed label information for given index."""
+        return self.transforms(self.get_image_and_label(index))
 
     def __len__(self) -> int:
         """Return the total number of samples in the dataset."""

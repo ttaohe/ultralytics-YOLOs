@@ -8,6 +8,7 @@ from ultralytics.data.video_dataset import VisDroneVideoDataset
 from ultralytics.utils import RANK, colorstr
 from ultralytics.utils.torch_utils import unwrap_model
 from ultralytics.utils.loss import v8DetectionLoss
+from ultralytics.cfg import DEFAULT_CFG
 
 class VideoValidator(DetectionValidator):
     """
@@ -16,6 +17,15 @@ class VideoValidator(DetectionValidator):
     Also manages memory reset on video boundaries.
     """
     def __init__(self, *args, **kwargs):
+        # Remove use_homography from args if present to avoid validation errors
+        if 'args' in kwargs and hasattr(kwargs['args'], 'use_homography'):
+            # Create a copy of args dict and remove use_homography
+            args_obj = kwargs['args']
+            args_dict = vars(args_obj).copy()
+            args_dict.pop('use_homography', None)
+            # Create new SimpleNamespace without use_homography
+            from types import SimpleNamespace
+            kwargs['args'] = SimpleNamespace(**args_dict)
         super().__init__(*args, **kwargs)
         self.last_video_id = None
 
@@ -128,6 +138,48 @@ class SAM2VideoTrainer(DetectionTrainer):
     It constructs batches with explicit time dimension: [Batch * Time, C, H, W].
     """
     
+    def __init__(self, cfg=DEFAULT_CFG, overrides=None, _callbacks=None):
+        """
+        Initialize SAM2VideoTrainer with support for custom use_homography & random_crop parameters.
+        
+        Args:
+            cfg: Configuration dictionary or path.
+            overrides: Dictionary of parameter overrides. Can include:
+                - use_homography: bool
+                - random_crop_size: int
+                - random_crop_prob: float
+                - val_imgsz: int (Optional: validation image size, e.g., 1280)
+            _callbacks: Optional callbacks.
+        """
+        # Extract custom parameters before calling super().__init__
+        # This prevents them from being validated by the default config system
+        if overrides is None:
+            overrides = {}
+        
+        use_homography = overrides.pop("use_homography", False)
+        random_crop_size = overrides.pop("random_crop_size", 0)
+        random_crop_prob = overrides.pop("random_crop_prob", 1.0)
+        val_imgsz = overrides.pop("val_imgsz", 0) # [EXPERIMENTAL] High-res validation support
+        
+        # Call parent initializer with cleaned overrides
+        super().__init__(cfg, overrides, _callbacks)
+        
+        # Store custom parameters on trainer/args
+        self.args.use_homography = use_homography
+        # random crop 仅在 VideoDataset 使用，不放进 args 以避免 CLI 校验
+        # 如果 random_crop_size 未设置或为 0，默认使用 imgsz
+        if random_crop_size <= 0:
+            random_crop_size = self.args.imgsz
+        
+        # IMPORTANT: Store in self.args so they are pickled and passed to DDP subprocesses
+        self.args.random_crop_size = int(random_crop_size)
+        self.args.random_crop_prob = float(random_crop_prob or 0.0)
+        self.args.val_imgsz = int(val_imgsz)
+
+        self.random_crop_size = self.args.random_crop_size
+        self.random_crop_prob = self.args.random_crop_prob
+        self.val_imgsz = self.args.val_imgsz # Store val_imgsz
+    
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLOVideo model."""
         model = YOLOVideo(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
@@ -135,12 +187,40 @@ class SAM2VideoTrainer(DetectionTrainer):
             model.load(weights)
         return model
 
+    def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
+        """Construct and return dataloader."""
+        # [EXPERIMENTAL] High-res validation support
+        # If mode is 'val' and val_imgsz is set, temporarily swap self.args.imgsz
+        original_imgsz = self.args.imgsz
+        if mode == "val" and self.val_imgsz > 0:
+            self.args.imgsz = self.val_imgsz
+            
+        try:
+            return super().get_dataloader(dataset_path, batch_size, rank, mode)
+        finally:
+            # Restore original imgsz
+            self.args.imgsz = original_imgsz
+
     def get_validator(self):
         """Returns a customized VideoValidator."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
         # Force batch size to 1 for validation to ensure correct video memory handling
         args = copy(self.args)
         args.batch = 2  # For DDP with 2 GPUs, batch size must be multiple of 2
+        
+        # [EXPERIMENTAL] High-res validation support
+        if self.val_imgsz > 0:
+            args.imgsz = self.val_imgsz
+
+        # Remove custom attributes to avoid validation errors
+        if hasattr(args, 'use_homography'):
+            delattr(args, 'use_homography')
+        if hasattr(args, 'random_crop_size'):
+            delattr(args, 'random_crop_size')
+        if hasattr(args, 'random_crop_prob'):
+            delattr(args, 'random_crop_prob')
+        if hasattr(args, 'val_imgsz'):
+            delattr(args, 'val_imgsz')
         return VideoValidator(
             self.test_loader, save_dir=self.save_dir, args=args, _callbacks=self.callbacks
         )
@@ -171,6 +251,9 @@ class SAM2VideoTrainer(DetectionTrainer):
             classes=self.args.classes,
             data=self.data,
             use_homography=mode == "train" and getattr(self.args, "use_homography", False),
+            # Random crop 控制，只在 train 模式启用
+            random_crop_size=self.random_crop_size if mode == "train" else 0,
+            random_crop_prob=self.random_crop_prob if mode == "train" else 0.0,
         )
 
     def preprocess_batch(self, batch):

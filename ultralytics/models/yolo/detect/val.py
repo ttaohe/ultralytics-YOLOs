@@ -311,13 +311,15 @@ class DetectionValidator(BaseValidator):
             batch (dict[str, Any]): Batch containing images and annotations.
             ni (int): Batch index.
         """
+        h, w = batch["img"].shape[2:]
         plot_images(
             labels=batch,
             paths=batch["im_file"],
-            fname=self.save_dir / f"val_batch{ni}_labels.jpg",
+            fname=self.save_dir / f"val_batch{ni}_labels_{h}x{w}.jpg",
             names=self.names,
             on_plot=self.on_plot,
         )
+        LOGGER.info(f"Saved validation batch {ni} with shape {h}x{w}")
 
     def plot_predictions(
         self, batch: dict[str, Any], preds: list[dict[str, torch.Tensor]], ni: int, max_det: int | None = None
