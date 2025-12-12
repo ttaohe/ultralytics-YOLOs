@@ -19,11 +19,11 @@ def train():
         data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
-        batch=12,   
+        batch=8,   
         project='runs/train-video',
         name='yolo12-sam2-video',
         device='0,3',
-        workers=12,
+        workers=4,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
         random_crop_prob=1.0,  # 100% 概率开启 Random Crop，结合 Mosaic 实现 Super Mosaic
@@ -45,6 +45,10 @@ def train():
         # translate=0.0,
         # shear=0.0,
         # perspective=0.0, 
+        
+        # NMS Performance Tuning
+        max_det=100,  # Limit max detections
+        conf=0.01,    # Raise validation conf threshold
     )
     
     trainer = SAM2VideoTrainer(overrides=args)

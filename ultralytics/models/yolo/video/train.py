@@ -185,6 +185,11 @@ class SAM2VideoTrainer(DetectionTrainer):
         model = YOLOVideo(cfg, nc=self.data["nc"], verbose=verbose and RANK == -1)
         if weights:
             model.load(weights)
+        # Check for explicit pretrained weights argument
+        elif getattr(self.args, "pretrained_weights", None):
+            if verbose and RANK == -1:
+                print(f"Loading pretrained weights from {self.args.pretrained_weights}...")
+            model.load(self.args.pretrained_weights)
         return model
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):

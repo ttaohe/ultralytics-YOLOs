@@ -44,12 +44,16 @@ def train():
         
         # 优化：开启 Baseline Mode，让 Dataset 跳过历史帧加载 (4x IO -> 1x IO)
         baseline_mode=True,
+
+        # NMS Performance Tuning
+        max_det= 100,  # Limit max detections to prevent NMS timeout during early training
+        conf= 0.01,    # Raise conf threshold for validation to reduce candidate count
     )
     
     # 加载官方 YOLO12n 模型 (假设存在，或者使用 yolo12n.yaml)
     # 注意：如果 yolo12n.pt 不存在，会自动下载。
-    # 如果你想从 yaml 重新初始化，请使用 'yolo12n.yaml'
-    model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/12/yolo12-baseline-p2.yaml') 
+    # Use load('yolo12n.pt') to transfer weights to custom P2 architecture
+    model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/12/yolo12-baseline-p2.yaml').load('yolo12n.pt')
     
     model.train(**args)
 
