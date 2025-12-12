@@ -276,6 +276,35 @@ class YOLOMemoryAttention(nn.Module):
     def reset_memory(self):
         """Reset memory bank."""
         self.memory_bank = []
+        
+    def set_memory(self, memory):
+        """
+        [State Injection]
+        Inject external memory state.
+        Args:
+            memory: List[Tensor] or Tensor representing the memory bank.
+        """
+        if isinstance(memory, list):
+            self.memory_bank = memory
+        elif isinstance(memory, torch.Tensor):
+            self.memory_bank = [memory]
+        elif memory is None:
+            self.memory_bank = []
+        else:
+             # Try to iterate if it's iterable but not list/tensor
+             try:
+                 self.memory_bank = list(memory)
+             except TypeError:
+                 self.memory_bank = [memory]
+
+    def get_memory(self):
+        """
+        [State Extraction]
+        Retrieve current memory bank state.
+        Returns:
+            List[Tensor]: Current memory bank.
+        """
+        return self.memory_bank
 
     def retrieve_memory_inference(self, curr):
         """Default inference memory retrieval: concat all history with T-Pos enc"""

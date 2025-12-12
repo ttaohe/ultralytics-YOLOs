@@ -23,6 +23,7 @@
 - [x] Implement `select_topk_features` function <!-- id: 3 -->
 - [x] Update `forward` loop to store only sparse tokens in Memory Bank <!-- id: 4 -->
 - [x] Implement sparse Cross-Attention (Query is dense, Key/Value is sparse) <!-- id: 5 -->
+- [x] **Memory Disaggregation**: Implement `set_memory` / `get_memory` for state injection (Plan B) <!-- id: memory_disaggregation -->
 
 ## 3. Verification
 - [x] Validate shape compatibility during Training <!-- id: 6 -->

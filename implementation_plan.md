@@ -29,11 +29,18 @@ Improve VisDrone training performance by fixing "Cold Start" issues, optimizing 
 - [x] **Sparse Cross Attention**: Modify `YOLOMemoryAttention` to handle sparse memory tokens (Query=Dense, Key/Value=Sparse).
 - [x] **Layer Adjustment**: Move Memory Attention from P4 (Stride 16) to P3 (Stride 8) in `yolo12-video-sparse-p3.yaml`.
 
+### 4. Memory Disaggregation (State Injection) - Plan B
+- [x] **Modify `SparseMemoryAttention`**: Add `set_memory(memory_tensor)` and `get_memory()` methods in `ultralytics/nn/modules/video_attention.py`.
+- [x] **Modify `YOLOMemoryAttention`**: Ensure base class supports these methods (or implements them as pass-through/no-op if needed).
+- [x] **Modify `YOLOVideo` Model**: Add `set_memory` and `get_memory` methods in `ultralytics/models/yolo/video/model.py` to forward calls to the attention module.
+- [x] **Create Inference Script**: Develop `inference_video.py` to demonstrate stateful inference loop using external memory management.
+
+
 ## Verification Plan
 
 ### Automated Tests
 - [x] **Shape Check**: Run `train_video.py` for 1 epoch (or small batch) to verify Memory Attention shapes and Top-K logic (no OOM).
-- [ ] **Resolution Check**: Use `debug_val_resolution.py` to confirm validation is running at high resolution (1920) and crops are working as expected.
+- [x] **Resolution Check**: Use `debug_val_resolution.py` to confirm validation is running at high resolution (1920) and crops are working as expected.
 
 ### Manual Verification
 - **Loss Curve**: Observe `box_loss` and `dfl_loss` in the first 5 epochs of `train_baseline.py`. It should drop significantly faster with pretraining.
