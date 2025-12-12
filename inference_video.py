@@ -2,7 +2,7 @@
 import cv2
 import torch
 import numpy as np
-from ultralytics import YOLOVideo
+
 import argparse
 from pathlib import Path
 
@@ -12,12 +12,15 @@ def main():
     parser.add_argument('--source', type=str, default='dataset/visdrone_video/test/uav0000305_00000_v', help='video source or folder')
     parser.add_argument('--imgsz', type=int, default=640, help='inference size')
     parser.add_argument('--conf', type=float, default=0.25, help='confidence threshold')
-    parser.add_argument('--device', type=str, default='0', help='cuda device')
+    parser.add_argument('--device', type=str, default='cuda:0', help='cuda device')
     opt = parser.parse_args()
 
-    # Load Model
+    from ultralytics import YOLO
+    
+    # Load Model using standard factory
     print(f"Loading model from {opt.weights}...")
-    model = YOLOVideo(opt.weights, task='detect')
+    yolo = YOLO(opt.weights)
+    model = yolo.model # Get the underlying nn.Module (YOLOVideo)
     model.to(opt.device)
     
     # Check if State Injection methods exist
@@ -37,27 +40,40 @@ def main():
         print(f"Error: Source {opt.source} is not a directory. This script assumes image folder for simplicity.")
         return
 
+    # Preprocessing
+    def preprocess(img, device):
+        img = cv2.resize(img, (opt.imgsz, opt.imgsz))
+        img = img.transpose((2, 0, 1))[::-1]  # HWC to CHW, BGR to RGB
+        img = np.ascontiguousarray(img)
+        img = torch.from_numpy(img).to(device)
+        img = img.float()  # uint8 to fp16/32
+        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
+        return img
+
     print(f"Inference on {len(files)} frames from {opt.source}")
     
     for i, file in enumerate(files):
-        img = cv2.imread(str(file))
-        if img is None: continue
+        img_raw = cv2.imread(str(file))
+        if img_raw is None: continue
         
+        # Preprocess
+        img = preprocess(img_raw, opt.device)
+
         # [State Injection] Inject previous memory state
         # In first frame, memory_state is None, model handles it as empty bank.
         model.set_memory(memory_state)
         
         # Inference
-        results = model(img, imgsz=opt.imgsz, conf=opt.conf, verbose=False)
+        # Note: model() return tuple (pred, proto) on training or (pred) on val depending on logic, 
+        # but yolo output is usually (pred). 
+        # Base DetectionModel forward returns x
+        with torch.no_grad():
+            results = model(img)
         
         # [State Extraction] Retrieve updated memory state
         memory_state = model.get_memory()
-        
-        # Visualization (Optional)
-        # res_plotted = results[0].plot()
-        # cv2.imshow("result", res_plotted)
-        # if cv2.waitKey(1) == ord('q'): break
-        
         if i % 100 == 0:
             mem_size = 0
             if memory_state:

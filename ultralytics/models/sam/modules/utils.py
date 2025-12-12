@@ -386,3 +386,33 @@ def add_decomposed_rel_pos(
     )
 
     return attn
+
+
+def compute_global_cis(x_coords: torch.Tensor, y_coords: torch.Tensor, dim: int, theta: float = 10000.0):
+    """
+    Compute axial complex exponential positional encodings for arbitrary 2D coordinates.
+    
+    Args:
+        x_coords (torch.Tensor): X coordinates with shape (..., N) or (N,).
+        y_coords (torch.Tensor): Y coordinates with shape (..., N) or (N,).
+        dim (int): Dimension of the positional encoding.
+        theta (float): Scaling factor.
+        
+    Returns:
+        (torch.Tensor): Complex exponential encodings (..., N, dim//2).
+    """
+    # Assuming x_coords and y_coords are matched in shape allow broadcasting
+    # Calculate frequencies
+    freqs = 1.0 / (theta ** (torch.arange(0, dim, 4)[: (dim // 4)].float() / dim))
+    freqs = freqs.to(x_coords.device)
+    
+    # Outer product equivalent for arbitrary shapes
+    # x_coords: (..., N), freqs: (D/4) -> (..., N, D/4)
+    freqs_x = x_coords.unsqueeze(-1) * freqs
+    freqs_y = y_coords.unsqueeze(-1) * freqs
+    
+    freqs_cis_x = torch.polar(torch.ones_like(freqs_x), freqs_x)
+    freqs_cis_y = torch.polar(torch.ones_like(freqs_y), freqs_y)
+    
+    # Concat -> (..., N, D/2)
+    return torch.cat([freqs_cis_x, freqs_cis_y], dim=-1)

@@ -23,7 +23,11 @@
 - [x] Implement `select_topk_features` function <!-- id: 3 -->
 - [x] Update `forward` loop to store only sparse tokens in Memory Bank <!-- id: 4 -->
 - [x] Implement sparse Cross-Attention (Query is dense, Key/Value is sparse) <!-- id: 5 -->
-- [x] **Memory Disaggregation**: Implement `set_memory` / `get_memory` for state injection (Plan B) <!-- id: memory_disaggregation -->
+- [x] **Memory Disaggregation**: Re-implement memory management to decouple it from the model class, supporting external state injection. <!-- id: 4 -->
+- [x] **Attention Visualization**: Create a visualizer to verify sparse attention behavior and debug feature selection. <!-- id: 5 -->
+    - [x] **Implement Monkey Patch**: Capture internal attention states without source modification.
+    - [x] **Coordinate Mapping**: Fix coordinate transforms (letterbox/padding) for accurate visualization.
+    - [x] **Optimize Memory**: Implement On-Demand Attention calculation to resolve OOM at high resolutions. id: memory_disaggregation -->
 
 ## 3. Verification
 - [x] Validate shape compatibility during Training <!-- id: 6 -->

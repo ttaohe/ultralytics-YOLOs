@@ -35,6 +35,13 @@ Improve VisDrone training performance by fixing "Cold Start" issues, optimizing 
 - [x] **Modify `YOLOVideo` Model**: Add `set_memory` and `get_memory` methods in `ultralytics/models/yolo/video/model.py` to forward calls to the attention module.
 - [x] **Create Inference Script**: Develop `inference_video.py` to demonstrate stateful inference loop using external memory management.
 
+### 5. Attention Visualization (Monkey Patch)
+- [x] **Create Visualizer Module**: Implement `visualization/visualize_attention.py` with `AttentionVisualizer` context manager.
+- [x] **Monkey Patch VanillaCrossAttention**: Temporarily replace `VanillaCrossAttention` to capture `attn_weights` and `indices` during forward pass.
+- [x] **Coordinate Reconstruction**: Implement logic to map sparse feature indices back to (Frame, X, Y) coordinates.
+- [x] **Visualization**: Draw lines connecting Query ROI to Top-K attended Memory points using OpenCV.
+- [x] **Memory Optimization**: Implement On-Demand Attention calculation to resolve OOM at 1920 resolution.
+
 
 ## Verification Plan
 
