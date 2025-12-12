@@ -1,5 +1,5 @@
 # Ultralytics Video Model
-from ultralytics.nn.modules import YOLOMemoryAttention
+from ultralytics.nn.modules import YOLOMemoryAttention, SparseMemoryAttention
 from ultralytics.nn.tasks import DetectionModel
 import torch
 
