@@ -19,11 +19,11 @@ def train():
         data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
-        batch=8,   
+        batch=4,   
         project='runs/train-video-sparse',
         name='yolo12-sam2-sparse-p3',
-        device='0,3',
-        workers=8,
+        device='0',
+        workers=4,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
         random_crop_prob=1.0,  # 100% 概率开启 Random Crop，结合 Mosaic 实现 Super Mosaic
@@ -36,11 +36,11 @@ def train():
         hsv_h=0.015,  # image HSV-Hue augmentation (fraction)
         hsv_s=0.7,    # image HSV-Saturation augmentation (fraction)
         hsv_v=0.4,    # image HSV-Value augmentation (fraction)
-        mosaic=1.0,   # 开启 Super Mosaic (已通过 Channel Stacking 支持时序同步)
-        # mixup=0.0,  # 保持关闭
-        # translate=0.0, # 保持关闭，random_crop 已经提供了平移效果
+        mosaic=0.0,   # 开启 Super Mosaic (已通过 Channel Stacking 支持时序同步)
+        mixup=0.0,  # 保持关闭
+        translate=0.0, # 保持关闭，random_crop 已经提供了平移效果
 
-        scale=0.5,    # 开启 Scale 缩放 (范围 0.5-1.5)
+        scale=0.0,    # 开启 Scale 缩放 (范围 0.5-1.5)
         # degrees=0.0,
         # translate=0.0,
         # shear=0.0,

@@ -53,7 +53,7 @@ def train():
     # 加载官方 YOLO12n 模型 (假设存在，或者使用 yolo12n.yaml)
     # 注意：如果 yolo12n.pt 不存在，会自动下载。
     # Use load('yolo12n.pt') to transfer weights to custom P2 architecture
-    model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/12/yolo12-baseline-p2.yaml').load('yolo12n.pt')
+    model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/12/yolo12-baseline-p2.yaml').load('runs/train/train_yolov10l-p234_visroneDet_epoch300_imgsz800_batch4_mixup02_cutmix02/weights/best.pt')
     
     model.train(**args)
 

@@ -4,6 +4,7 @@ import torch.nn.functional as F
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.optimize import linear_sum_assignment
 from ultralytics.nn.modules.video_attention import SparseMemoryAttention, GlobalRoPEAttention
 
 class AttentionVisualizer:
@@ -170,54 +171,108 @@ class AttentionVisualizer:
         
         Nq = q_tensor.shape[2]
         Nk = k_tensor.shape[2]
-        grid_dim = int(np.sqrt(Nq))
         
-        if grid_dim * grid_dim != Nq:
-            print(f"Warning: Non-square feature map (Nq={Nq}).")
+        # Infer Grid Dimensions from q_coords if available
+        # q_coords is (B, Nq, 2) containing (x, y) grid coordinates
+        if 'q_coords' in context and context['q_coords'] is not None:
+             q_coords = context['q_coords'][0] # Take first batch
+             # q_coords are likely 0..W-1, 0..H-1
+             # We assume they cover the full grid.
+             max_x = q_coords[:, 0].max().item()
+             max_y = q_coords[:, 1].max().item()
+             
+             # If strictly grid coordinates:
+             w_feat = int(max_x) + 1
+             h_feat = int(max_y) + 1
+             
+             if w_feat * h_feat != Nq:
+                 # Fallback if coords aren't perfect grid (e.g. sparse queries?)
+                 # But MemoryAttention inference q is usually full dense 'curr'.
+                 print(f"Warning: Coords inferred dims ({w_feat}x{h_feat}={w_feat*h_feat}) != Nq ({Nq}). Fallback to sqrt.")
+                 side = int(np.sqrt(Nq))
+                 w_feat, h_feat = side, side
+        else:
+             # Fallback
+             side = int(np.sqrt(Nq))
+             w_feat, h_feat = side, side
+        
+        grid_dim = w_feat # For legacy compat mostly, but we should use w/h explicitly
+        
+        if w_feat * h_feat != Nq:
+            print(f"Warning: Non-rectangular feature map (Nq={Nq}, inferred {w_feat}x{h_feat}).")
         
         # Letterbox Params
-        model_stride = imgsz / grid_dim 
+        # Check if non-square stride is needed
+        # Assuming original image was square-padded to imgsz, 
+        # then feature map should respect aspect ratio of that padded image.
+        # Actually YOLO usually pads to stride multiple.
+        # model_stride is how many pixels one grid cell represents.
+        model_stride_w = imgsz / w_feat
+        model_stride_h = imgsz / h_feat 
         H, W = current_frame_img.shape[:2]
         ratio, (pad_w, pad_h) = self._get_letterbox_params((H, W), imgsz)
         
-        # Determine Sample Points (Center + 9 Random)
-        sample_points_norm = []
-        if query_box is not None:
-             cx, cy, w, h = query_box
-             sample_points_norm.append((cx, cy))
-             np.random.seed(42)
-             for _ in range(9):
-                 rx = cx + (np.random.rand() - 0.5) * w
-                 ry = cy + (np.random.rand() - 0.5) * h
-                 sample_points_norm.append((rx, ry))
-        else:
-            sample_points_norm.append((0.5, 0.5))
+
 
         # Prepare Current Frame (Draw Green Dots)
         vis_curr = current_frame_img.copy()
+
+        # 2. Select Query Tokens
+        # REFACTOR: Use the Center Point of the query box instead of random sampling.
+        # This focuses the attention analysis on the core of the object.
         q_indices = []
-
-        for (qx_norm, qy_norm) in sample_points_norm:
-            qx_norm = min(max(qx_norm, 0.0), 1.0)
-            qy_norm = min(max(qy_norm, 0.0), 1.0)
-
-            qx_pixel = qx_norm * W
-            qy_pixel = qy_norm * H
+        
+        if query_box is not None:
+            # query_box is (cx_norm, cy_norm, w_norm, h_norm)
+            cx_norm, cy_norm, w_norm, h_norm = query_box
+            
+            # Convert normalized center to pixel coordinates
+            cx_pixel = cx_norm * W
+            cy_pixel = cy_norm * H
             
             # Draw sample point
-            cv2.circle(vis_curr, (int(qx_pixel), int(qy_pixel)), 3, (0, 255, 0), -1)
+            cv2.circle(vis_curr, (int(cx_pixel), int(cy_pixel)), 3, (0, 255, 0), -1)
 
-            # Map to Grid
-            q_lb_x = qx_pixel * ratio + pad_w
-            q_lb_y = qy_pixel * ratio + pad_h
-            gx = int(q_lb_x / model_stride)
-            gy = int(q_lb_y / model_stride)
-            gx = min(max(gx, 0), grid_dim - 1)
-            gy = min(max(gy, 0), grid_dim - 1)
-            q_idx = gy * grid_dim + gx
+            # Map to Feature Grid
+            # Apply Inverse Letterbox & Stride
+            q_lb_x = cx_pixel * ratio + pad_w
+            q_lb_y = cy_pixel * ratio + pad_h
             
-            if q_idx < Nq:
-                q_indices.append(q_idx)
+            gx = int(q_lb_x / model_stride_w)
+            gy = int(q_lb_y / model_stride_h)
+            
+            # Clamp to grid size
+            gx = min(max(gx, 0), w_feat - 1)
+            gy = min(max(gy, 0), h_feat - 1)
+            
+            # Flatten index
+            center_idx = gy * w_feat + gx
+            
+            if center_idx < Nq:
+                q_indices.append(center_idx)
+                
+            if len(q_indices) == 0:
+                 print("Warning: Object center maps to invalid feature index.")
+                 return None, None
+        else:
+            # Fallback to image center if no query_box
+            cx_pixel = W / 2.0
+            cy_pixel = H / 2.0
+            cv2.circle(vis_curr, (int(cx_pixel), int(cy_pixel)), 3, (0, 255, 0), -1)
+
+            q_lb_x = cx_pixel * ratio + pad_w
+            q_lb_y = cy_pixel * ratio + pad_h
+            
+            gx = int(q_lb_x / model_stride_w)
+            gy = int(q_lb_y / model_stride_h)
+            
+            gx = min(max(gx, 0), w_feat - 1)
+            gy = min(max(gy, 0), h_feat - 1)
+            
+            center_idx = gy * w_feat + gx
+            if center_idx < Nq:
+                q_indices.append(center_idx)
+
 
         if not q_indices:
             return None, None
@@ -232,9 +287,12 @@ class AttentionVisualizer:
         # Average over heads -> [N_samples, Nk]
         attn_dist = attn_weights.mean(dim=1).squeeze(0) 
         
-        # Get Top-1 Target for each sample
-        vals, indices = attn_dist.topk(1, dim=-1)
-        vals, indices = vals.flatten().cpu().numpy(), indices.flatten().cpu().numpy()
+        # Get Top-5 Target for each sample
+        vals, indices = attn_dist.topk(5, dim=-1)
+        # Flatten for processing: (N_samples, 5) -> (N_samples * 5)
+        # We need to keep track of rank: (Sample 0 Rank 0, Sample 0 Rank 1... Sample 9 Rank 4)
+        vals_flat = vals.flatten().cpu().numpy()
+        indices_flat = indices.flatten().cpu().numpy()
         
         # --- Memory Alignment Fix ---
         if not hasattr(self.target_module, '_viz_indices_list'):
@@ -288,62 +346,118 @@ class AttentionVisualizer:
         offsets = [0] + list(np.cumsum(k_sizes))
         
         # Draw Results
-        print(f"Visualizing {len(indices)} points mapping to aligned history (Buffer: {num_available_imgs} / Memory: {num_memory_indices} frames):")
+        print(f"Visualizing Heatmap Overlay (Score-Weighted) to EACH aligned history frame (Buffer: {num_available_imgs} / Memory: {num_memory_indices} frames):")
         
-        def draw_triangle(img, pt, size, color):
+        def draw_marker(img, pt, size, color, shape='circle'):
             x, y = pt
-            p1 = (x, y - size)
-            p2 = (x - size, y + size)
-            p3 = (x + size, y + size)
-            cv2.drawContours(img, [np.array([p1, p2, p3])], 0, color, -1)
+            if shape == 'triangle':
+                p1 = (x, y - size)
+                p2 = (x - size, y + size)
+                p3 = (x + size, y + size)
+                cv2.drawContours(img, [np.array([p1, p2, p3])], 0, color, -1)
+                cv2.drawContours(img, [np.array([p1, p2, p3])], 0, (0,0,0), 1)
+            else:
+                cv2.circle(img, (x, y), size, color, -1)
+
+        # Iterate over each memory frame explicitly
+        for f_idx in range(len(offsets) - 1):
+            start_k = offsets[f_idx]
+            end_k = offsets[f_idx+1]
+            
+            # Slice attention: [N_samples, K_frame]
+            attn_slice = attn_dist[:, start_k:end_k]
+            
+            # 1. Aggregate Score: Find the "Best Score having any sample"
+            # Max pooling across samples says "If *any* sample liked this key strongly, it's hot."
+            scores, _ = attn_slice.max(dim=0) # [K_frame]
+            scores = scores.cpu().numpy()
+            
+            if len(scores) == 0: continue
+
+            # 2. Select Top-K Features
+            # Instead of a heatmap, we visualize discrete points of attention.
+            top_k = 256 
+            if len(scores) > top_k:
+                top_args = np.argsort(scores)[-top_k:]
+                sorted_scores = scores[top_args]
+                sorted_indices = np.atleast_1d(relevant_indices[f_idx][0].cpu().numpy())[top_args]
+            else:
+                top_args = np.argsort(scores)
+                sorted_scores = scores[top_args]
+                sorted_indices = np.atleast_1d(relevant_indices[f_idx][0].cpu().numpy())[top_args]
+            
+            # 3. Prepare Colors (Jet Colormap)
+            # Map score rank to color: Low (Blue) -> High (Red)
+            # We use rank-based coloring or score-based? 
+            # Score-based is better if we normalize by max.
+            # But rank-based ensures visibility even if distribution is peaked.
+            # Let's use simple Min-Max normalization of the Top-K scores for coloring.
+            
+            if len(sorted_scores) > 0:
+                s_min = sorted_scores.min()
+                s_max = sorted_scores.max()
+                if s_max > s_min:
+                    norm_scores = (sorted_scores - s_min) / (s_max - s_min)
+                else:
+                    norm_scores = np.zeros_like(sorted_scores)
+                
+                # Map 0..1 to 0..255 for colormap
+                color_indices = (norm_scores * 255).astype(np.uint8)
+                # Apply colormap to a 1D strip
+                colors_bgr = cv2.applyColorMap(color_indices.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
+            
+            # 4. Draw Markers
+            # Resize Logic: We need to map feature grid coords -> Original Image Coords
+            # We use the same rigorous logic as the Red Triangle.
+            
+            img_idx = num_available_imgs - num_memory_indices + f_idx
+            if img_idx < 0 or img_idx >= num_available_imgs:
+                continue
+            
+            # Draw on a copy first? No, draw directly on the frame copy in the list
+            # We need to make sure we don't overwrite the same image if reused?
+            # vis_mems_unaligned is a list of copies, so safe.
+            target_img = vis_mems_unaligned[img_idx]
+            
+            for i, idx in enumerate(sorted_indices):
+                # 1. Feature Grid -> Input Image Coords (with Padding)
+                gy = idx // w_feat
+                gx = idx % w_feat
+                
+                # Center of the grid cell
+                y_input = (gy + 0.5) * model_stride_h
+                x_input = (gx + 0.5) * model_stride_w
+                
+                # 2. Input Image -> Original Image Coords (Remove Padding)
+                # x_real = (x_input - pad_w) / ratio
+                # y_real = (y_input - pad_h) / ratio
+                
+                x_real = (x_input - pad_w) / ratio
+                y_real = (y_input - pad_h) / ratio
+                
+                pt = (int(x_real), int(y_real))
+                
+                # Color from our map
+                color = tuple(int(c) for c in colors_bgr[i])
+                
+                # Draw small circle
+                # Larger for higher scores?
+                radius = 2 if i < (len(sorted_indices) - 10) else 4
+                cv2.circle(target_img, pt, radius, color, -1)
+                
+                # Draw Triangle for the absolute Top-1 (Last one)
+                if i == len(sorted_indices) - 1:
+                     draw_marker(target_img, pt, 8, (0, 0, 255), shape='triangle')
+                     
+            # No overlay blending needed, we drew directly on the image.
+
+        return vis_curr, vis_mems_unaligned
+
+        # Original global logic removed/replaced by above frame-wise logic
+        """
+        for i, (g_idx, val) in enumerate(zip(indices_flat, vals_flat)):
+             ...
+        """
         
-        for i, (g_idx, val) in enumerate(zip(indices, vals)):
-            # Find frame in relevant_indices
-            frame_idx = -1
-            for f in range(len(offsets) - 1):
-                if offsets[f] <= g_idx < offsets[f+1]:
-                    frame_idx = f
-                    break
-            
-            if frame_idx == -1: continue
-
-            # Map to Image Index
-            # img_idx = img_start_offset + frame_idx
-            # Wait, let's trace:
-            # If buffer has 8 images [0..7], memory has 3 indices. 
-            # Means memory is for [5, 6, 7]? Or [0, 1, 2]? 
-            # 'relevant_indices' is the suffix of ALL history. 
-            # 'memory_frames_imgs' is the END of the stream buffer.
-            # So relevant_indices[-1] SHOULD align with memory_frames_imgs[-1].
-            
-            # So:
-            # matched_img_idx = (len(imgs) - 1) - (len(indices) - 1 - frame_idx)
-            #               = len(imgs) - len(indices) + frame_idx
-            
-            img_idx = num_available_imgs - num_memory_indices + frame_idx
-            
-            if img_idx < 0:
-                # We don't have this image (too old)
-                continue
-            if img_idx >= num_available_imgs:
-                # Should not happen if alignment correct
-                continue
-
-            local_k_idx = g_idx - offsets[frame_idx]
-            dense_grid_idx = relevant_indices[frame_idx][0, local_k_idx].item()
-            
-            # Grid -> Pixel
-            m_gy = dense_grid_idx // grid_dim
-            m_gx = dense_grid_idx % grid_dim
-            
-            m_lb_x = m_gx * model_stride + model_stride // 2
-            m_lb_y = m_gy * model_stride + model_stride // 2
-            
-            mx = int((m_lb_x - pad_w) / ratio)
-            my = int((m_lb_y - pad_h) / ratio)
-            
-            print(f"frame_idx: {frame_idx} (img: {img_idx}) score: {val:.4f}", mx, my)
-            draw_triangle(vis_mems_unaligned[img_idx], (mx, my), 6, (0, 0, 255))
-            
         return vis_curr, vis_mems_unaligned
 

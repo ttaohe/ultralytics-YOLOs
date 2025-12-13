@@ -20,8 +20,8 @@ def preprocess(img, imgsz, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='runs/train-video-sparse/yolo12-sam2-sparse-p39/weights/best.pt')
-    parser.add_argument('--source', type=str, default='dataset/visdrone_video/test/uav0000305_00000_v')
+    parser.add_argument('--weights', type=str, default='runs/train-video-sparse/yolo12-sam2-sparse-p32/weights/best.pt')
+    parser.add_argument('--source', type=str, default='/home/hetao/graduate/data/VisDrone-VID-yolo/images/test/uav0000073_00600_v/')
     parser.add_argument('--imgsz', type=int, default=1920)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--output', type=str, default='visualization/output')
