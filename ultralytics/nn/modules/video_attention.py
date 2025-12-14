@@ -522,9 +522,20 @@ class SparseMemoryAttention(YOLOMemoryAttention):
     Sparse Memory Attention using Top-K selection with Global RoPE.
     Preserves spatial awareness by tracking coordinates of sparse tokens.
     """
-    def __init__(self, d_model=None, max_memory=8, topk_ratio=0.1):
+    def __init__(self, d_model=None, max_memory=8, topk_ratio=0.1, score_mode: str = "learned"):
+        """
+        Args:
+            d_model: target feature dim (optional, inferred from in_channels).
+            max_memory: maximum number of frames to keep in memory bank.
+            topk_ratio: ratio of tokens to keep per frame.
+            score_mode: how to score tokens when selecting Top-K.
+                - "l2": use L2 norm only (original behavior).
+                - "learned": use a learnable scoring head on features.
+                - "mix": combine learned score and L2 norm.
+        """
         super().__init__(d_model, max_memory)
         self.topk_ratio = topk_ratio
+        self.score_mode = score_mode
         
     def _build_layers(self, in_channels):
         """Build layers with GlobalRoPEMemoryAttentionLayer"""
@@ -534,6 +545,10 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         self.proj_in = nn.Conv2d(in_channels, target_dim, 1) if in_channels != target_dim else nn.Identity()
         self.proj_out = nn.Conv2d(target_dim, in_channels, 1) if target_dim != in_channels else nn.Identity()
         self.memory_encoder = YOLOMemoryEncoder(in_channels, target_dim)
+
+        # Learnable scoring head for sparse selection (used when score_mode != "l2")
+        # Operates on flattened token features of shape (B, L, D) via a single linear layer.
+        self.score_head = nn.Linear(target_dim, 1)
 
         # Custom Layer config for Sparse: Global RoPE
         # We use GlobalRoPEMemoryAttentionLayer which passes 'pos' (coords) to 'cross_attn_image'
@@ -574,9 +589,26 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         """
         B, L, D = features.shape
         k = max(1, int(L * self.topk_ratio))
-        
-        # Score: L2 Norm
-        scores = torch.norm(features, dim=-1) # (B, L)
+
+        # ------------------------------------------------------------------
+        # Scoring: decide which tokens are important enough to keep.
+        # ------------------------------------------------------------------
+        if self.score_mode == "l2":
+            # Original behavior: use L2 norm as importance score.
+            scores = torch.norm(features, dim=-1)  # (B, L)
+        elif self.score_mode == "learned":
+            # Pure learnable scoring from a small linear head.
+            # features: (B, L, D) -> (B, L)
+            scores = self.score_head(features).squeeze(-1)
+        elif self.score_mode == "mix":
+            # Mix learned score and L2 norm (simple additive fusion).
+            l2_scores = torch.norm(features, dim=-1)
+            learned_scores = self.score_head(features).squeeze(-1)
+            scores = l2_scores + learned_scores
+        else:
+            # Fallback to L2 if score_mode is invalid.
+            scores = torch.norm(features, dim=-1)
+
         topk_scores, topk_indices = torch.topk(scores, k, dim=1) # (B, k)
         
         # Gather Features (B, k, D)

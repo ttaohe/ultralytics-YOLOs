@@ -22,7 +22,7 @@ def train():
         batch=4,   
         project='runs/train-video-sparse',
         name='yolo12-sam2-sparse-p3',
-        device='3',
+        device='0',
         workers=4,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
