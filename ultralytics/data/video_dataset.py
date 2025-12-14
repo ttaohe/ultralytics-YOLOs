@@ -8,6 +8,8 @@ from ultralytics.data.augment import LetterBox
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.utils import LOGGER
 
+from .augment_video import TargetMask
+
 class VisDroneVideoDataset(YOLODataset):
     """
     Dataset class for VisDrone-VID (Video Object Detection) with History Support.
@@ -21,6 +23,7 @@ class VisDroneVideoDataset(YOLODataset):
         use_homography: bool = False,
         random_crop_size: int = 0,
         random_crop_prob: float = 1.0,
+        mask_ratio: float = 0.0, 
         **kwargs,
     ):
         self._hyp = kwargs.get("hyp")
@@ -29,6 +32,7 @@ class VisDroneVideoDataset(YOLODataset):
         # Random window crop for high-res VisDrone frames (applied before transforms)
         self.random_crop_size = int(random_crop_size or 0)
         self.random_crop_prob = float(random_crop_prob or 0.0)
+        self.mask_ratio = float(mask_ratio or 0.0)
         
         # Save original flip probabilities and disable them for super()
         # We will manually handle flip in __getitem__ to ensure synchronization
@@ -49,11 +53,12 @@ class VisDroneVideoDataset(YOLODataset):
         # We need to set self.augment manually because super().__init__ hasn't run yet
         self.augment = kwargs.get("augment", True)
         self.prefix = kwargs.get("prefix", "")
-        self.prefix = kwargs.get("prefix", "")
-        # self._check_video_augmentations() # Removed: We now support augmentations via Channel Stacking
         
         if self.augment:
             LOGGER.info(f"{self.prefix}Random Crop Config: size={self.random_crop_size}, prob={self.random_crop_prob}")
+            if self.mask_ratio > 0:
+                 self.target_mask_aug = TargetMask(p=0.5, mask_ratio=self.mask_ratio)
+                 LOGGER.info(f"{self.prefix}TargetMask Enabled: ratio={self.mask_ratio}, p=0.5")
 
         super().__init__(*args, **kwargs)
         
@@ -318,6 +323,12 @@ class VisDroneVideoDataset(YOLODataset):
         # data['img'] here will be a 6-CH Tensor (augmented synchronously)
         data = super().__getitem__(index)
         
+        if self.augment:
+             # print(f"DEBUG: calling target_mask? has={hasattr(self, 'target_mask_aug')}")
+             if hasattr(self, 'target_mask_aug'):
+                 # print("DEBUG: Calling TargetMask!")
+                 data = self.target_mask_aug(data)
+
         # 2. Unstack 6-channel Tensor -> Current (3-ch) + History (3-ch)
         img_stack = data['img'] # Tensor [6, H, W]
         

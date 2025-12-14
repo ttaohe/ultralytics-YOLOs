@@ -22,7 +22,7 @@ def train():
         batch=4,   
         project='runs/train-video-sparse',
         name='yolo12-sam2-sparse-p3',
-        device='0',
+        device='3',
         workers=4,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
@@ -41,6 +41,9 @@ def train():
         translate=0.0, # 保持关闭，random_crop 已经提供了平移效果
 
         scale=0.0,    # 开启 Scale 缩放 (范围 0.5-1.5)
+        
+        # Target Masking for Cross-Attention
+        mask_ratio=0.6, # Max ratio of object area to mask
         # degrees=0.0,
         # translate=0.0,
         # shear=0.0,

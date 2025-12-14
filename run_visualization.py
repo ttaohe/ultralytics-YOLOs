@@ -20,8 +20,8 @@ def preprocess(img, imgsz, device):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--weights', type=str, default='runs/train-video-sparse/yolo12-sam2-sparse-p32/weights/best.pt')
-    parser.add_argument('--source', type=str, default='/home/hetao/graduate/data/VisDrone-VID-yolo/images/test/uav0000073_00600_v/')
+    parser.add_argument('--weights', type=str, default='runs/train-video-sparse/yolo12-sam2-sparse-p33/weights/best.pt')
+    parser.add_argument('--source', type=str, default='/home/hetao/graduate/data/VisDrone-VID-yolo/images/test/uav0000009_03358_v/')
     parser.add_argument('--imgsz', type=int, default=1920)
     parser.add_argument('--device', type=str, default='cuda:0')
     parser.add_argument('--output', type=str, default='visualization/output')
@@ -91,7 +91,9 @@ def main():
                     # Pass currently stored history images corresponding to memory
                     mem_imgs = image_buffer[-8:] 
                     
-                    vis_curr, vis_mems = visualizer.visualize(img_raw, mem_imgs, query_box=query_box, imgsz=opt.imgsz)
+                    vis_curr, vis_mems_no_rope, vis_mems_rope = visualizer.visualize(
+                        img_raw, mem_imgs, query_box=query_box, imgsz=opt.imgsz
+                    )
                     
                     if vis_curr is not None:
                         # Draw the detection box on current frame for confirmation
@@ -113,7 +115,8 @@ def main():
                         vis_curr_small = cv2.resize(vis_curr, (0,0), fx=scale, fy=scale)
                         
                         row_mem = []
-                        for m in vis_mems:
+                        # 默认用 With-RoPE 版本做缩略展示
+                        for m in vis_mems_rope:
                             m_small = cv2.resize(m, (0,0), fx=scale, fy=scale)
                             row_mem.append(m_small)
                         
@@ -122,11 +125,17 @@ def main():
                             
                             cv2.imwrite(str(output_dir / f"frame_{i:03d}_curr.jpg"), vis_curr)
                             
-                            # Also save a montage if possible (width matching might be tricky)
-                            # Just save individual links
-                            for midx, m_img in enumerate(vis_mems):
-                                frame_real_idx = i - len(vis_mems) + midx
-                                cv2.imwrite(str(output_dir / f"frame_{i:03d}_link_to_{frame_real_idx:03d}.jpg"), m_img)
+                            # 分别保存 No-RoPE / With-RoPE 的可视化结果
+                            for midx, (m_img_no, m_img_rope) in enumerate(zip(vis_mems_no_rope, vis_mems_rope)):
+                                frame_real_idx = i - len(vis_mems_rope) + midx
+                                cv2.imwrite(
+                                    str(output_dir / f"frame_{i:03d}_link_to_{frame_real_idx:03d}_norpe.jpg"),
+                                    m_img_no,
+                                )
+                                cv2.imwrite(
+                                    str(output_dir / f"frame_{i:03d}_link_to_{frame_real_idx:03d}_rope.jpg"),
+                                    m_img_rope,
+                                )
                             print(f"Saved visualization for frame {i}")
                 else:
                     print(f"Frame {i}: No detections found.")

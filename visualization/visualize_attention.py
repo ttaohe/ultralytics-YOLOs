@@ -5,7 +5,8 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import linear_sum_assignment
-from ultralytics.nn.modules.video_attention import SparseMemoryAttention, GlobalRoPEAttention
+from ultralytics.nn.modules.video_attention import SparseMemoryAttention, GlobalRoPEAttention, apply_global_rotary_enc
+from ultralytics.models.sam.modules.utils import compute_global_cis
 
 class AttentionVisualizer:
     def __init__(self, model):
@@ -162,7 +163,7 @@ class AttentionVisualizer:
         # Retrieve captured data
         if not hasattr(self.attn_module, '_viz_context'):
             print("No attention data captured.")
-            return None, None
+            return None, None, None
             
         context = self.attn_module._viz_context
         q_tensor = context['q'] # [B, H, Nq, D]
@@ -218,34 +219,44 @@ class AttentionVisualizer:
         vis_curr = current_frame_img.copy()
 
         # 2. Select Query Tokens
-        # REFACTOR: Use the Center Point of the query box instead of random sampling.
-        # This focuses the attention analysis on the core of the object.
+        # REFACTOR: Use the SNAP-TO-GRID Center Point (Anchor Point) instead of Regression Center.
+        # This aligns visualization with the actual feature token responsible for prediction.
         q_indices = []
         
         if query_box is not None:
             # query_box is (cx_norm, cy_norm, w_norm, h_norm)
             cx_norm, cy_norm, w_norm, h_norm = query_box
             
-            # Convert normalized center to pixel coordinates
-            cx_pixel = cx_norm * W
-            cy_pixel = cy_norm * H
+            # 1. Convert normalized predictions to Input Image Space (Letterboxed)
+            # Coordinates in the model's input tensor (e.g. 640x640)
+            cx_input = cx_norm * W * ratio + pad_w
+            cy_input = cy_norm * H * ratio + pad_h
             
-            # Draw sample point
-            cv2.circle(vis_curr, (int(cx_pixel), int(cy_pixel)), 3, (0, 255, 0), -1)
-
-            # Map to Feature Grid
-            # Apply Inverse Letterbox & Stride
-            q_lb_x = cx_pixel * ratio + pad_w
-            q_lb_y = cy_pixel * ratio + pad_h
+            # 2. Snap to Grid (Anchor Point)
+            # Round to nearest stride center
+            gx = int(cx_input / model_stride_w)
+            gy = int(cy_input / model_stride_h)
             
-            gx = int(q_lb_x / model_stride_w)
-            gy = int(q_lb_y / model_stride_h)
-            
-            # Clamp to grid size
+            # Clamp to valid grid range
             gx = min(max(gx, 0), w_feat - 1)
             gy = min(max(gy, 0), h_feat - 1)
             
-            # Flatten index
+            # 3. Calculate Snapped Pixel Coordinates (for Visualization)
+            # Re-project grid center back to visual image space
+            snapped_cx_input = (gx + 0.5) * model_stride_w
+            snapped_cy_input = (gy + 0.5) * model_stride_h
+            
+            # DEBUG: Print Snap Details
+            print(f"DEBUG: Box Center (Input): ({cx_input:.2f}, {cy_input:.2f}) -> Grid ({gx}, {gy}) -> Anchor Point: ({snapped_cx_input:.2f}, {snapped_cy_input:.2f})")
+            print(f"DEBUG: Snap Delta: ({snapped_cx_input - cx_input:.2f}, {snapped_cy_input - cy_input:.2f}) pixels")
+            
+            snapped_cx_real = (snapped_cx_input - pad_w) / ratio
+            snapped_cy_real = (snapped_cy_input - pad_h) / ratio
+            
+            # Draw Green Dot at the Snapped Anchor Point
+            cv2.circle(vis_curr, (int(snapped_cx_real), int(snapped_cy_real)), 4, (0, 255, 0), -1)
+            
+            # Flatten index for Attention Query
             center_idx = gy * w_feat + gx
             
             if center_idx < Nq:
@@ -253,7 +264,7 @@ class AttentionVisualizer:
                 
             if len(q_indices) == 0:
                  print("Warning: Object center maps to invalid feature index.")
-                 return None, None
+                 return None, None, None
         else:
             # Fallback to image center if no query_box
             cx_pixel = W / 2.0
@@ -275,29 +286,77 @@ class AttentionVisualizer:
 
 
         if not q_indices:
-            return None, None
+            return None, None, None
             
-        # Vectorized Attention Calculation
+        # 3. RoPE A/B Test Calculation
         q_idx_tensor = torch.tensor(q_indices, device=q_tensor.device)
-        q_vecs = torch.index_select(q_tensor, 2, q_idx_tensor) # [B, H, N_samples, D]
+        q_vecs_raw = torch.index_select(q_tensor, 2, q_idx_tensor) # [B, H, N_samples, D] (Raw Content)
         
-        attn_logits = torch.matmul(q_vecs, k_tensor.transpose(-2, -1)) * scale
-        attn_weights = attn_logits.softmax(dim=-1)
+        # --- A. Content-Based Attention (No RoPE) ---
+        attn_logits_noch = torch.matmul(q_vecs_raw, k_tensor.transpose(-2, -1)) * scale
+        attn_weights_noch = attn_logits_noch.softmax(dim=-1)
+        attn_dist_noch = attn_weights_noch.mean(dim=1).squeeze(0) # [N_samples, Nk]
         
-        # Average over heads -> [N_samples, Nk]
-        attn_dist = attn_weights.mean(dim=1).squeeze(0) 
-        
-        # Get Top-5 Target for each sample
-        vals, indices = attn_dist.topk(5, dim=-1)
-        # Flatten for processing: (N_samples, 5) -> (N_samples * 5)
-        # We need to keep track of rank: (Sample 0 Rank 0, Sample 0 Rank 1... Sample 9 Rank 4)
-        vals_flat = vals.flatten().cpu().numpy()
-        indices_flat = indices.flatten().cpu().numpy()
+        # --- B. Real Model Attention (With RoPE) ---
+        # We need to manually apply RoPE to Q and K
+        if 'q_coords' in context and context['q_coords'] is not None and 'k_coords' in context and context['k_coords'] is not None:
+             q_coords_all = context['q_coords']
+             k_coords_all = context['k_coords']
+             
+             # Compute Freqs
+             dim = q_tensor.shape[-1]
+             # Assuming single head or head_dim
+             # q_tensor is [B, H, N, D]. RoPE expects last dim to be D.
+             # D is head_dim.
+             
+             freqs_cis_q = compute_global_cis(q_coords_all[..., 0], q_coords_all[..., 1], dim, 10000.0).to(q_tensor.device)
+             freqs_cis_k = compute_global_cis(k_coords_all[..., 0], k_coords_all[..., 1], dim, 10000.0).to(k_tensor.device)
+             
+             # Apply Global RoPE to BOTH Q and K in a single call
+             # Note: apply_global_rotary_enc expects (B, H, N, D) tensors and
+             # corresponding (B, N, D/2) complex freqs for each.
+             q_rope, k_rope = apply_global_rotary_enc(
+                 q_tensor,
+                 k_tensor,
+                 freqs_cis_q,
+                 freqs_cis_k
+             )
+             
+             # Now select Q vectors
+             q_vecs_rope = torch.index_select(q_rope, 2, q_idx_tensor)
+             
+             attn_logits_rope = torch.matmul(q_vecs_rope, k_rope.transpose(-2, -1)) * scale
+             attn_weights_rope = attn_logits_rope.softmax(dim=-1)
+             attn_dist_rope = attn_weights_rope.mean(dim=1).squeeze(0)
+        else:
+             print("Warning: RoPE coordinates missing. Fallback to No-RoPE for both.")
+             attn_dist_rope = attn_dist_noch
+
+
+        # Helper to process distribution (kept for potential future use)
+        def get_top_scored_indices(attn_dist, available_indices):
+             # attn_dist: [N_samples, Nk] (we take max over samples)
+             scores, _ = attn_dist.max(dim=0) # [K_frame]
+             scores = scores.cpu().numpy()
+             if len(scores) == 0:
+                 return [], []
+             
+             top_k = 64 # Show top 64 points per frame
+             if len(scores) > top_k:
+                top_args = np.argsort(scores)[-top_k:]
+             else:
+                top_args = np.argsort(scores)
+             
+             sorted_scores = scores[top_args]
+             sorted_indices = np.atleast_1d(available_indices[0].cpu().numpy())[top_args]
+             
+             return sorted_indices, sorted_scores
+
         
         # --- Memory Alignment Fix ---
         if not hasattr(self.target_module, '_viz_indices_list'):
              print("No memory indices list found.")
-             return None, None
+             return None, None, None
              
         # Align accumulated indices with current Memory Tensor (FIFO)
         # k_tensor has 'Nk' tokens. We need to find the suffix of _viz_indices_list that sums to Nk.
@@ -319,34 +378,24 @@ class AttentionVisualizer:
                 return None, None
         
         if suffix_start_idx == -1:
-            # Could happen if Nk is 0 or mismatch
-            if Nk == 0: return vis_curr, []
+            if Nk == 0:
+                return vis_curr, [], []
             print(f"Warning: Could not align indices (Nk={Nk}).")
-            return None, None
-
-        # Slice memory frames to match the indices suffix
-        # relevant_indices corresponds to the full set of frames in the Memory Bank.
-        # memory_frames_imgs corresponds to the last N frames we have images for.
+            return None, None, None
         
         num_memory_indices = len(relevant_indices)
         num_available_imgs = len(memory_frames_imgs)
         
-        # Calculate lag. If lag > 0, we are missing images for the oldest memory frames.
-        # We can still visualize the matched ones.
-        img_start_offset = num_available_imgs - num_memory_indices
-        
-        # Determine the aligned images list
-        # We essentially want to map: relevant_indices[i] -> memory_frames_imgs[img_start_offset + i]
-        # Valid 'i' are those where (img_start_offset + i) >= 0 and < num_available_imgs
-        
-        vis_mems_unaligned = [img.copy() for img in memory_frames_imgs]
+        # Separate visualizations for No-RoPE and With-RoPE
+        vis_mems_no_rope = [img.copy() for img in memory_frames_imgs]
+        vis_mems_rope = [img.copy() for img in memory_frames_imgs]
         
         # Calculate Offsets for aligned indices (MUST use full relevant_indices for correct Key addressing)
         k_sizes = [ind.shape[1] for ind in relevant_indices]
         offsets = [0] + list(np.cumsum(k_sizes))
         
         # Draw Results
-        print(f"Visualizing Heatmap Overlay (Score-Weighted) to EACH aligned history frame (Buffer: {num_available_imgs} / Memory: {num_memory_indices} frames):")
+        print(f"Visualizing RoPE A/B Test (Red=With RoPE, Blue=No RoPE, brightness ~ score):")
         
         def draw_marker(img, pt, size, color, shape='circle'):
             x, y = pt
@@ -355,7 +404,11 @@ class AttentionVisualizer:
                 p2 = (x - size, y + size)
                 p3 = (x + size, y + size)
                 cv2.drawContours(img, [np.array([p1, p2, p3])], 0, color, -1)
-                cv2.drawContours(img, [np.array([p1, p2, p3])], 0, (0,0,0), 1)
+                # cv2.drawContours(img, [np.array([p1, p2, p3])], 0, (255,255,255), 1)
+            elif shape == 'cross':
+                 # Draw X
+                 cv2.line(img, (x-size, y-size), (x+size, y+size), color, 2)
+                 cv2.line(img, (x-size, y+size), (x+size, y-size), color, 2)
             else:
                 cv2.circle(img, (x, y), size, color, -1)
 
@@ -365,93 +418,87 @@ class AttentionVisualizer:
             end_k = offsets[f_idx+1]
             
             # Slice attention: [N_samples, K_frame]
-            attn_slice = attn_dist[:, start_k:end_k]
+            attn_slice_noch = attn_dist_noch[:, start_k:end_k]
+            attn_slice_rope = attn_dist_rope[:, start_k:end_k]
             
-            # 1. Aggregate Score: Find the "Best Score having any sample"
-            # Max pooling across samples says "If *any* sample liked this key strongly, it's hot."
-            scores, _ = attn_slice.max(dim=0) # [K_frame]
-            scores = scores.cpu().numpy()
+            curr_indices = relevant_indices[f_idx] # [B, K_frame] (Indices of sparse tokens in that frame)
             
-            if len(scores) == 0: continue
+            # Get Top-Scored Local Indices
+            # Note: The output indices are indices INTO 'curr_indices' array? 
+            # No, get_top_scored_indices needs to return indices into 'curr_indices' 
+            # THEN we map those to Grid indices.
+            
+            # Let's inline simplified selection and also keep scores for color coding
+            def select_and_map_points(attn_slice, available_indices):
+                 """
+                 Returns list of (grid_index, normalized_score) for top-K keys.
+                 """
+                 scores, _ = attn_slice.max(dim=0)
+                 scores = scores.cpu().numpy()
+                 if len(scores) == 0:
+                     return []
+                 
+                 top_k = 64
+                 if len(scores) > top_k:
+                     top_args = np.argsort(scores)[-top_k:]
+                 else:
+                     top_args = np.argsort(scores)
+                 
+                 selected_scores = scores[top_args]
+                 if selected_scores.size == 0:
+                     return []
+                 
+                 # Normalize scores to [0, 1] for color intensity
+                 s_min = selected_scores.min()
+                 s_max = selected_scores.max()
+                 if s_max - s_min < 1e-6:
+                     norm_scores = np.ones_like(selected_scores)
+                 else:
+                     norm_scores = (selected_scores - s_min) / (s_max - s_min)
+                 
+                 # Map local index (0..K_frame-1) -> Grid Index (available_indices)
+                 # available_indices is [1, K_frame]
+                 selected_grid_indices = available_indices[0, top_args].cpu().numpy()
+                 
+                 return list(zip(selected_grid_indices.tolist(), norm_scores.tolist()))
+            
+            points_noch = select_and_map_points(attn_slice_noch, curr_indices)
+            points_rope = select_and_map_points(attn_slice_rope, curr_indices)
 
-            # 2. Select Top-K Features
-            # Instead of a heatmap, we visualize discrete points of attention.
-            top_k = 256 
-            if len(scores) > top_k:
-                top_args = np.argsort(scores)[-top_k:]
-                sorted_scores = scores[top_args]
-                sorted_indices = np.atleast_1d(relevant_indices[f_idx][0].cpu().numpy())[top_args]
-            else:
-                top_args = np.argsort(scores)
-                sorted_scores = scores[top_args]
-                sorted_indices = np.atleast_1d(relevant_indices[f_idx][0].cpu().numpy())[top_args]
-            
-            # 3. Prepare Colors (Jet Colormap)
-            # Map score rank to color: Low (Blue) -> High (Red)
-            # We use rank-based coloring or score-based? 
-            # Score-based is better if we normalize by max.
-            # But rank-based ensures visibility even if distribution is peaked.
-            # Let's use simple Min-Max normalization of the Top-K scores for coloring.
-            
-            if len(sorted_scores) > 0:
-                s_min = sorted_scores.min()
-                s_max = sorted_scores.max()
-                if s_max > s_min:
-                    norm_scores = (sorted_scores - s_min) / (s_max - s_min)
-                else:
-                    norm_scores = np.zeros_like(sorted_scores)
-                
-                # Map 0..1 to 0..255 for colormap
-                color_indices = (norm_scores * 255).astype(np.uint8)
-                # Apply colormap to a 1D strip
-                colors_bgr = cv2.applyColorMap(color_indices.reshape(-1, 1), cv2.COLORMAP_JET).reshape(-1, 3)
-            
-            # 4. Draw Markers
-            # Resize Logic: We need to map feature grid coords -> Original Image Coords
-            # We use the same rigorous logic as the Red Triangle.
             
             img_idx = num_available_imgs - num_memory_indices + f_idx
             if img_idx < 0 or img_idx >= num_available_imgs:
                 continue
             
-            # Draw on a copy first? No, draw directly on the frame copy in the list
-            # We need to make sure we don't overwrite the same image if reused?
-            # vis_mems_unaligned is a list of copies, so safe.
-            target_img = vis_mems_unaligned[img_idx]
+            target_img_no = vis_mems_no_rope[img_idx]
+            target_img_rope = vis_mems_rope[img_idx]
             
-            for i, idx in enumerate(sorted_indices):
-                # 1. Feature Grid -> Input Image Coords (with Padding)
+            # Draw No-RoPE (Blue Crosses) on its own image
+            for idx, score in points_noch:
                 gy = idx // w_feat
                 gx = idx % w_feat
-                
-                # Center of the grid cell
                 y_input = (gy + 0.5) * model_stride_h
                 x_input = (gx + 0.5) * model_stride_w
-                
-                # 2. Input Image -> Original Image Coords (Remove Padding)
-                # x_real = (x_input - pad_w) / ratio
-                # y_real = (y_input - pad_h) / ratio
-                
                 x_real = (x_input - pad_w) / ratio
                 y_real = (y_input - pad_h) / ratio
+                # Score controls brightness (0.4 ~ 1.0)
+                intensity = 0.4 + 0.6 * float(score)
+                color_no = (int(255 * intensity), 0, 0)  # BGR, blue channel
+                draw_marker(target_img_no, (int(x_real), int(y_real)), 3, color_no, shape='cross') # Blue
                 
-                pt = (int(x_real), int(y_real))
-                
-                # Color from our map
-                color = tuple(int(c) for c in colors_bgr[i])
-                
-                # Draw small circle
-                # Larger for higher scores?
-                radius = 2 if i < (len(sorted_indices) - 10) else 4
-                cv2.circle(target_img, pt, radius, color, -1)
-                
-                # Draw Triangle for the absolute Top-1 (Last one)
-                if i == len(sorted_indices) - 1:
-                     draw_marker(target_img, pt, 8, (0, 0, 255), shape='triangle')
-                     
-            # No overlay blending needed, we drew directly on the image.
+            # Draw With-RoPE (Red Circles) on a separate image
+            for idx, score in points_rope:
+                gy = idx // w_feat
+                gx = idx % w_feat
+                y_input = (gy + 0.5) * model_stride_h
+                x_input = (gx + 0.5) * model_stride_w
+                x_real = (x_input - pad_w) / ratio
+                y_real = (y_input - pad_h) / ratio
+                intensity = 0.4 + 0.6 * float(score)
+                color_rope = (0, 0, int(255 * intensity))  # BGR, red channel
+                draw_marker(target_img_rope, (int(x_real), int(y_real)), 3, color_rope, shape='circle') # Red
 
-        return vis_curr, vis_mems_unaligned
+        return vis_curr, vis_mems_no_rope, vis_mems_rope
 
         # Original global logic removed/replaced by above frame-wise logic
         """
@@ -459,5 +506,5 @@ class AttentionVisualizer:
              ...
         """
         
-        return vis_curr, vis_mems_unaligned
+        return vis_curr, vis_mems_no_rope, vis_mems_rope
 

@@ -25,6 +25,7 @@ def verify():
         random_crop_size=640,
         random_crop_prob=1.0,
         val_imgsz=1920,
+        mask_ratio=0.6, # Verification value
         
         # Augmentation Params
         hsv_h=0.015,
@@ -70,6 +71,11 @@ def verify():
     print(f"  • random_crop_size: {getattr(dataset, 'random_crop_size', 'N/A')}")
     print(f"  • random_crop_prob: {getattr(dataset, 'random_crop_prob', 'N/A')}")
     print(f"  • use_homography:   {getattr(dataset, 'use_homography', 'N/A')}")
+    print(f"  • mask_ratio:       {getattr(dataset, 'mask_ratio', 'N/A')}")
+    if hasattr(dataset, 'target_mask_aug'):
+         print(f"  • target_mask_aug:  {dataset.target_mask_aug.p}, ratio={dataset.target_mask_aug.mask_ratio}")
+    else:
+         print(f"  • target_mask_aug:  Disabled (Not found)")
     
     # Check Transforms (Built by YOLODataset)
     print(f"\n[Standard Augmentations in YOLODataset.transforms]")
