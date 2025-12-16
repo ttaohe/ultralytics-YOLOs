@@ -357,9 +357,12 @@ class YOLOMemoryAttention(nn.Module):
         
         if self.attn is None or self.d_model is None:
             self._build_layers(x.shape[1])
+            # Ensure initialized layers match input dtype/device
+            if not self.training:
+                self.to(dtype=x.dtype, device=x.device)
             
         if self.maskmem_tpos_enc is None:
-            self.maskmem_tpos_enc = nn.Parameter(torch.zeros(self.max_memory, 1, 1, self.d_model).to(x.device))
+            self.maskmem_tpos_enc = nn.Parameter(torch.zeros(self.max_memory, 1, 1, self.d_model, dtype=torch.float32, device=x.device))
             nn.init.trunc_normal_(self.maskmem_tpos_enc, std=0.02)
 
         # Update spatial shape for RoPE
@@ -368,6 +371,22 @@ class YOLOMemoryAttention(nn.Module):
                 layer.self_attn.set_spatial_shape(H, W)
             if isinstance(layer.cross_attn_image, YOLORoPEAttention):
                 layer.cross_attn_image.set_spatial_shape(H, W)
+
+        # Check for dtype mismatch (e.g. model float, input half) and correct it
+        if self.proj_in is not None:
+             ref_param = None
+             if isinstance(self.proj_in, nn.Conv2d):
+                 ref_param = self.proj_in.weight
+             elif self.memory_encoder is not None:
+                 for p in self.memory_encoder.parameters():
+                      ref_param = p
+                      break
+             
+             if ref_param is not None:
+                  if self.training and ref_param.dtype != torch.float32:
+                      self.to(dtype=torch.float32)
+                  elif not self.training and (ref_param.dtype != x.dtype or ref_param.device != x.device):
+                      self.to(dtype=x.dtype, device=x.device)
 
         x_proj = self.proj_in(x)
         x_flat = x_proj.flatten(2).permute(0, 2, 1)  # (N, tokens, d_model)
@@ -640,6 +659,9 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         
         if self.attn is None or self.d_model is None:
             self._build_layers(x.shape[1])
+            # Ensure initialized layers match input dtype/device
+            if not self.training:
+                self.to(dtype=x.dtype, device=x.device)
             
         # Generate Grid Coordinates for this batch
         # Assuming local inputs (0..H, 0..W). If random_crop is used, strict spatial consistency is lost 
@@ -649,6 +671,22 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         grid = torch.stack([xx, yy], dim=-1).float() # (H, W, 2)
         grid = grid.unsqueeze(0).repeat(B_total, 1, 1, 1) # (B, H, W, 2)
         grid_flat = grid.flatten(1, 2) # (B, L, 2)
+
+        # Check for dtype mismatch (e.g. model float, input half) and correct it
+        if self.proj_in is not None:
+             ref_param = None
+             if isinstance(self.proj_in, nn.Conv2d):
+                 ref_param = self.proj_in.weight
+             elif self.memory_encoder is not None:
+                 for p in self.memory_encoder.parameters():
+                      ref_param = p
+                      break
+             
+             if ref_param is not None:
+                  if self.training and ref_param.dtype != torch.float32:
+                      self.to(dtype=torch.float32)
+                  elif not self.training and (ref_param.dtype != x.dtype or ref_param.device != x.device):
+                      self.to(dtype=x.dtype, device=x.device)
 
         x_proj = self.proj_in(x)
         x_flat = x_proj.flatten(2).permute(0, 2, 1)  # (B, L, D)
