@@ -27,7 +27,7 @@ def train():
         epochs=100,
         imgsz=640, 
         batch=4,   
-        project='runs/train-baseline',
+        project='runs/train-baseline-sparse_data',
         name='yolo12n-baseline',
         device='0',
         workers=4,  # Reduce workers to avoid "ancdata" error (file descriptor limit)
@@ -55,6 +55,7 @@ def train():
         # NMS Performance Tuning
         max_det= 100,  # Limit max detections to prevent NMS timeout during early training
         conf= 0.01,    # Raise conf threshold for validation to reduce candidate count
+        vid_stride=5,  # Enable sparse sampling for baseline too
     )
     
     # Handle resume logic

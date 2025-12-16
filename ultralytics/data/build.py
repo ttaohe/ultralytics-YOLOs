@@ -171,6 +171,7 @@ def build_yolo_dataset(
         # Pass random_crop parameters if dataset supports them
         random_crop_size=random_crop_size if mode == "train" else 0,
         random_crop_prob=random_crop_prob if mode == "train" else 0.0,
+        vid_stride=getattr(cfg, 'vid_stride', 1),
     )
 
 

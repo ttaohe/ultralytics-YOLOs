@@ -48,6 +48,11 @@ def train():
         # translate=0.0, # 保持关闭，random_crop 已经提供了平移效果
 
         scale=0.5,    # 开启 Scale 缩放 (范围 0.5-1.5)
+        
+        # Drop Mask Switch (TargetMask Augmentation)
+        # 0.0 = 关闭, >0.0 = 开启 (e.g. 0.1 means 10% masks are dropped)
+        mask_ratio=0.0, 
+        
         # degrees=0.0,
         # translate=0.0,
         # shear=0.0,
