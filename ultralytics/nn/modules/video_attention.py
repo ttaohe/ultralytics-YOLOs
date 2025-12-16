@@ -424,7 +424,7 @@ class YOLOMemoryAttention(nn.Module):
                         # Add T-Pos Enc
                         # NOTE: For Sparse subclass, we might want to sparsify AFTER this.
                         # Base class assumes dense.
-                        feat_flat = feat_flat + t_enc
+                        feat_flat = feat_flat + t_enc.to(dtype=feat_flat.dtype)
                         mem_frames_list.append(feat_flat)
 
                     memory = torch.cat(mem_frames_list, dim=1) # (B, k*L, D)
@@ -526,7 +526,7 @@ class YOLOMemoryAttention(nn.Module):
             t_enc = self.maskmem_tpos_enc[idx] 
             
             # Note: memory bank stores (B, L, D) or (B, K, D) if sparse
-            m_enc = m.to(curr.device) + t_enc
+            m_enc = m.to(dtype=curr.dtype, device=curr.device) + t_enc.to(dtype=curr.dtype, device=curr.device)
             mem_list.append(m_enc)
         
         return torch.cat(mem_list, dim=1)
@@ -812,8 +812,9 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         mem_feats = []
         mem_coords = []
         for m_feat, m_coord in self.memory_bank:
-            mem_feats.append(m_feat.to(curr.device))
-            mem_coords.append(m_coord.to(curr.device))
+            mem_feats.append(m_feat.to(dtype=curr.dtype, device=curr.device))
+            # Coords are always float32 usually, but best to match device. Coords shouldn't be cast to Half if used as grid.
+            mem_coords.append(m_coord.to(device=curr.device))
             
         return torch.cat(mem_feats, dim=1), torch.cat(mem_coords, dim=1)
 
