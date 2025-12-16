@@ -162,6 +162,7 @@ class SAM2VideoTrainer(DetectionTrainer):
         random_crop_prob = overrides.pop("random_crop_prob", 1.0)
         val_imgsz = overrides.pop("val_imgsz", 0) # [EXPERIMENTAL] High-res validation support
         mask_ratio = overrides.pop("mask_ratio", 0.0) # Target Masking for Cross-Attention
+        vid_stride = overrides.pop("vid_stride", 1) # Sparse Video Sampling
         
         # Call parent initializer with cleaned overrides
         super().__init__(cfg, overrides, _callbacks)
@@ -178,6 +179,7 @@ class SAM2VideoTrainer(DetectionTrainer):
         self.args.random_crop_prob = float(random_crop_prob or 0.0)
         self.args.val_imgsz = int(val_imgsz)
         self.args.mask_ratio = float(mask_ratio or 0.0)
+        self.args.vid_stride = int(vid_stride)
 
         self.random_crop_size = self.args.random_crop_size
         self.random_crop_prob = self.args.random_crop_prob
@@ -240,6 +242,8 @@ class SAM2VideoTrainer(DetectionTrainer):
             delattr(args, 'val_imgsz')
         if hasattr(args, 'mask_ratio'):
             delattr(args, 'mask_ratio')
+        if hasattr(args, 'vid_stride'):
+             delattr(args, 'vid_stride')
         return VideoValidator(
             self.test_loader, save_dir=self.save_dir, args=args, _callbacks=self.callbacks
         )
@@ -274,6 +278,7 @@ class SAM2VideoTrainer(DetectionTrainer):
             random_crop_size=self.random_crop_size if mode == "train" else 0,
             random_crop_prob=self.random_crop_prob if mode == "train" else 0.0,
             mask_ratio=self.mask_ratio if mode == "train" else 0.0,
+            vid_stride=self.args.vid_stride if mode == "train" else 1,
         )
 
     def preprocess_batch(self, batch):

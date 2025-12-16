@@ -20,13 +20,13 @@ def train():
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
         batch=4,   
-        project='runs/train-video-sparse',
+        project='runs/train-video-sparse-modelwdata',
         name='yolo12-sam2-sparse-p3',
-        device='0',
-        workers=4,
+        device='3',
+        workers=2,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
-        random_crop_prob=1.0,  # 100% 概率开启 Random Crop，结合 Mosaic 实现 Super Mosaic
+        random_crop_prob=1.0,  # Re-enable Random Crop for verification
         
         # [EXPERIMENTAL] 验证时使用高分辨率 (1920)，训练时使用低分辨率 (640)
         # 修复 Scale Mismatch 问题：验证时使用原图分辨率
@@ -44,6 +44,10 @@ def train():
         
         # Target Masking for Cross-Attention
         mask_ratio=0.6, # Max ratio of object area to mask
+        
+        # Sparse Sampling
+        vid_stride=5,  # 20% frames
+        
         # degrees=0.0,
         # translate=0.0,
         # shear=0.0,

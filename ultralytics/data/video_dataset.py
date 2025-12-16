@@ -24,8 +24,10 @@ class VisDroneVideoDataset(YOLODataset):
         random_crop_size: int = 0,
         random_crop_prob: float = 1.0,
         mask_ratio: float = 0.0, 
+        vid_stride: int = 1,
         **kwargs,
     ):
+        self.vid_stride = max(1, int(vid_stride or 1))
         self._hyp = kwargs.get("hyp")
         self.baseline_mode = kwargs.get("baseline_mode", False) or getattr(self._hyp, "baseline_mode", False)
         self.use_homography = use_homography and not self.baseline_mode
@@ -78,6 +80,10 @@ class VisDroneVideoDataset(YOLODataset):
             self.orb = cv2.ORB_create(nfeatures=500)
         else:
             self.orb = None
+
+        # Filter indices based on vid_stride
+        if self.vid_stride > 1 and self.augment:
+             self._filter_dataset_by_stride()
 
     # ---------------------------- Random window crop helpers ---------------------------- #
 
@@ -137,6 +143,62 @@ class VisDroneVideoDataset(YOLODataset):
         
         return label
 
+
+    
+    def _filter_dataset_by_stride(self):
+        """
+        Filter dataset to only keep every Nth frame (vid_stride) for each video.
+        This modifies self.im_files, self.labels, self.video_indices, etc. in place.
+        """
+        keep_indices = []
+        
+        # We need to process each video separately
+        # self.video_indices is already populated by _get_video_indices in __init__
+        
+        # Find boundaries of each video
+        # Since self.video_indices is a numpy array of video IDs corresponding to self.im_files
+        unique_vids = np.unique(self.video_indices)
+        
+        for vid in unique_vids:
+            # Get all indices for this video
+            # Note: np.where returns a tuple
+            indices = np.where(self.video_indices == vid)[0]
+            indices = sorted(indices) # Ensure sorted order
+            
+            # Select every Nth frame
+            # Example: indices=[0, 1, 2, 3, 4, 5], stride=5 -> [0, 5]
+            selected = indices[::self.vid_stride]
+            keep_indices.extend(selected)
+            
+        keep_indices = sorted(keep_indices)
+        
+        # Apply filtering
+        n_before = len(self.im_files)
+        
+        # Filter im_files
+        self.im_files = [self.im_files[i] for i in keep_indices]
+        
+        # Filter labels
+        self.labels = [self.labels[i] for i in keep_indices]
+        
+        # Filter video_indices (re-compute or filter)
+        # It's safer to re-compute or filter array
+        self.video_indices = self.video_indices[keep_indices]
+        
+        # Handle other arrays if they exist (npy_files, ims, etc form BaseDataset)
+        if hasattr(self, 'npy_files') and self.npy_files:
+             self.npy_files = [self.npy_files[i] for i in keep_indices]
+        if hasattr(self, 'ims') and self.ims:
+             # self.ims is a list of [None]*ni mostly
+             self.ims = [self.ims[i] for i in keep_indices]
+             self.im_hw0 = [self.im_hw0[i] for i in keep_indices]
+             self.im_hw = [self.im_hw[i] for i in keep_indices]
+             
+        self.ni = len(self.im_files)
+        
+        LOGGER.info(f"{self.prefix}Sparse Video Sampling enabled: "
+                    f"vid_stride={self.vid_stride}. "
+                    f"Reduced dataset from {n_before} to {self.ni} images.")
 
     def _get_video_indices(self):
         """
@@ -200,6 +262,13 @@ class VisDroneVideoDataset(YOLODataset):
         # Random Stride Logic (SAM3-style)
         stride_min = 1
         stride_max = 10 if self.augment else 1
+        # Random Stride Logic (SAM3-style)
+        stride_min = 1
+        # Adjust stride max based on video stride to keep temporal gap reasonable
+        stride_max = 10 if self.augment else 1
+        if self.vid_stride > 1:
+            stride_max = max(1, 10 // self.vid_stride)
+            
         # Use np.random.randint for consistency
         stride = np.random.randint(stride_min, stride_max + 1)
 
