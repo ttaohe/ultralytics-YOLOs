@@ -50,7 +50,8 @@ class VideoValidator(DetectionValidator):
     def preprocess(self, batch):
         """
         Preprocess batch and handle memory reset.
-        Assumes batch_size=1 for safe memory management during validation.
+        Assumes per-rank batch_size=1 for safe memory management during validation.
+        (Enforced by SAM2VideoTrainer.get_dataloader(mode="val").)
         """
         # Check if we need to reset memory
         # We need access to video indices from the dataset.
@@ -202,6 +203,14 @@ class SAM2VideoTrainer(DetectionTrainer):
         original_imgsz = self.args.imgsz
         if mode == "val" and self.val_imgsz > 0:
             self.args.imgsz = self.val_imgsz
+
+        # IMPORTANT (Video validation correctness):
+        # We must keep per-rank batch_size=1 so that the model memory state is not mixed
+        # across different video sequences within the same batch.
+        # Note: Our build_dataloader() does NOT divide batch by world_size when using DDP,
+        # so setting batch_size=1 here results in a global batch = world_size (still a multiple).
+        if mode == "val":
+            batch_size = 1
             
         try:
             return super().get_dataloader(dataset_path, batch_size, rank, mode)
@@ -212,9 +221,9 @@ class SAM2VideoTrainer(DetectionTrainer):
     def get_validator(self):
         """Returns a customized VideoValidator."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
-        # Force batch size to 1 for validation to ensure correct video memory handling
+        # Force per-rank batch size to 1 for validation to ensure correct video memory handling
         args = copy(self.args)
-        args.batch = 2  # For DDP with 2 GPUs, batch size must be multiple of 2
+        args.batch = 1  # For VideoValidator logic; actual loader batch is enforced in get_dataloader(mode="val")
         
         # [EXPERIMENTAL] High-res validation support
         if self.val_imgsz > 0:

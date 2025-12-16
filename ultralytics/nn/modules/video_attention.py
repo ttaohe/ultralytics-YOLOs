@@ -593,16 +593,26 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         # ------------------------------------------------------------------
         # Scoring: decide which tokens are important enough to keep.
         # ------------------------------------------------------------------
-        if self.score_mode == "l2":
+        # NOTE: Older checkpoints (训练于本改动之前) 在反序列化时不会自动拥有
+        # `score_mode` / `score_head` 属性。为兼容这些模型，这里做一次
+        # 运行时回退：如果没有 score_mode，则直接退回到原始 L2 行为。
+        score_mode = getattr(self, "score_mode", "l2")
+
+        if score_mode == "l2":
             # Original behavior: use L2 norm as importance score.
             scores = torch.norm(features, dim=-1)  # (B, L)
-        elif self.score_mode == "learned":
+        elif score_mode == "learned":
             # Pure learnable scoring from a small linear head.
             # features: (B, L, D) -> (B, L)
+            if not hasattr(self, "score_head"):
+                # 兼容旧权重：按当前通道数动态创建一个线性头
+                self.score_head = nn.Linear(D, 1).to(features.device)
             scores = self.score_head(features).squeeze(-1)
-        elif self.score_mode == "mix":
+        elif score_mode == "mix":
             # Mix learned score and L2 norm (simple additive fusion).
             l2_scores = torch.norm(features, dim=-1)
+            if not hasattr(self, "score_head"):
+                self.score_head = nn.Linear(D, 1).to(features.device)
             learned_scores = self.score_head(features).squeeze(-1)
             scores = l2_scores + learned_scores
         else:

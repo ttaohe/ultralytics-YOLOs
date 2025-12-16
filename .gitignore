@@ -178,5 +178,5 @@ calibration_*.npy
 
 #custom ign
 trained_weights/
-visualization/
-visualization_aug_debug/
+visualization/*
+visualization_aug_debug/*

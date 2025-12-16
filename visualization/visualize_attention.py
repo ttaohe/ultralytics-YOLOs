@@ -423,48 +423,38 @@ class AttentionVisualizer:
             
             curr_indices = relevant_indices[f_idx] # [B, K_frame] (Indices of sparse tokens in that frame)
             
-            # Get Top-Scored Local Indices
-            # Note: The output indices are indices INTO 'curr_indices' array? 
-            # No, get_top_scored_indices needs to return indices into 'curr_indices' 
-            # THEN we map those to Grid indices.
-            
-            # Let's inline simplified selection and also keep scores for color coding
-            def select_and_map_points(attn_slice, available_indices):
-                 """
-                 Returns list of (grid_index, normalized_score) for top-K keys.
-                 """
-                 scores, _ = attn_slice.max(dim=0)
-                 scores = scores.cpu().numpy()
-                 if len(scores) == 0:
-                     return []
-                 
-                 top_k = 64
-                 if len(scores) > top_k:
-                     top_args = np.argsort(scores)[-top_k:]
-                 else:
-                     top_args = np.argsort(scores)
-                 
-                 selected_scores = scores[top_args]
-                 if selected_scores.size == 0:
-                     return []
-                 
-                 # Normalize scores to [0, 1] for color intensity
-                 s_min = selected_scores.min()
-                 s_max = selected_scores.max()
-                 if s_max - s_min < 1e-6:
-                     norm_scores = np.ones_like(selected_scores)
-                 else:
-                     norm_scores = (selected_scores - s_min) / (s_max - s_min)
-                 
-                 # Map local index (0..K_frame-1) -> Grid Index (available_indices)
-                 # available_indices is [1, K_frame]
-                 selected_grid_indices = available_indices[0, top_args].cpu().numpy()
-                 
-                 return list(zip(selected_grid_indices.tolist(), norm_scores.tolist()))
-            
-            points_noch = select_and_map_points(attn_slice_noch, curr_indices)
-            points_rope = select_and_map_points(attn_slice_rope, curr_indices)
+            # ------------------------------------------------------------------
+            # 1) 构建 dense heatmap：每个 sparse token 都参与，得到网格上的连续热力图
+            # ------------------------------------------------------------------
+            scores_no_all, _ = attn_slice_noch.max(dim=0)   # [K_frame]
+            scores_rope_all, _ = attn_slice_rope.max(dim=0) # [K_frame]
+            scores_no_all = scores_no_all.cpu().numpy()
+            scores_rope_all = scores_rope_all.cpu().numpy()
 
+            # 初始化特征网格尺度上的热力图 (h_feat, w_feat)
+            heat_no = np.zeros((h_feat, w_feat), dtype=np.float32)
+            heat_rope = np.zeros((h_feat, w_feat), dtype=np.float32)
+
+            K_frame = curr_indices.shape[1]
+            for local_idx in range(K_frame):
+                grid_idx = curr_indices[0, local_idx].item()
+                gy = grid_idx // w_feat
+                gx = grid_idx % w_feat
+                if gy < 0 or gy >= h_feat or gx < 0 or gx >= w_feat:
+                    continue
+                # 使用 max 聚合，避免同一位置被多个 token 覆盖时丢失峰值
+                heat_no[gy, gx] = max(heat_no[gy, gx], float(scores_no_all[local_idx]))
+                heat_rope[gy, gx] = max(heat_rope[gy, gx], float(scores_rope_all[local_idx]))
+
+            def normalize_heatmap(h):
+                h_max = h.max()
+                h_min = h.min()
+                if h_max - h_min < 1e-6:
+                    return np.zeros_like(h)
+                return (h - h_min) / (h_max - h_min + 1e-6)
+
+            heat_no = normalize_heatmap(heat_no)
+            heat_rope = normalize_heatmap(heat_rope)
             
             img_idx = num_available_imgs - num_memory_indices + f_idx
             if img_idx < 0 or img_idx >= num_available_imgs:
@@ -472,31 +462,25 @@ class AttentionVisualizer:
             
             target_img_no = vis_mems_no_rope[img_idx]
             target_img_rope = vis_mems_rope[img_idx]
-            
-            # Draw No-RoPE (Blue Crosses) on its own image
-            for idx, score in points_noch:
-                gy = idx // w_feat
-                gx = idx % w_feat
-                y_input = (gy + 0.5) * model_stride_h
-                x_input = (gx + 0.5) * model_stride_w
-                x_real = (x_input - pad_w) / ratio
-                y_real = (y_input - pad_h) / ratio
-                # Score controls brightness (0.4 ~ 1.0)
-                intensity = 0.4 + 0.6 * float(score)
-                color_no = (int(255 * intensity), 0, 0)  # BGR, blue channel
-                draw_marker(target_img_no, (int(x_real), int(y_real)), 3, color_no, shape='cross') # Blue
-                
-            # Draw With-RoPE (Red Circles) on a separate image
-            for idx, score in points_rope:
-                gy = idx // w_feat
-                gx = idx % w_feat
-                y_input = (gy + 0.5) * model_stride_h
-                x_input = (gx + 0.5) * model_stride_w
-                x_real = (x_input - pad_w) / ratio
-                y_real = (y_input - pad_h) / ratio
-                intensity = 0.4 + 0.6 * float(score)
-                color_rope = (0, 0, int(255 * intensity))  # BGR, red channel
-                draw_marker(target_img_rope, (int(x_real), int(y_real)), 3, color_rope, shape='circle') # Red
+
+            Hm, Wm = target_img_no.shape[:2]
+
+            # 将热力图插值到图像分辨率
+            heat_no_resized = cv2.resize(heat_no, (Wm, Hm), interpolation=cv2.INTER_CUBIC)
+            heat_rope_resized = cv2.resize(heat_rope, (Wm, Hm), interpolation=cv2.INTER_CUBIC)
+
+            heat_no_uint8 = (heat_no_resized * 255).astype(np.uint8)
+            heat_rope_uint8 = (heat_rope_resized * 255).astype(np.uint8)
+
+            heat_no_color = cv2.applyColorMap(heat_no_uint8, cv2.COLORMAP_JET)
+            heat_rope_color = cv2.applyColorMap(heat_rope_uint8, cv2.COLORMAP_JET)
+
+            # 叠加到原始帧上，得到 dense heatmap 风格的可视化
+            alpha = 0.6
+            cv2.addWeighted(heat_no_color, alpha, target_img_no, 1 - alpha, 0, dst=target_img_no)
+            cv2.addWeighted(heat_rope_color, alpha, target_img_rope, 1 - alpha, 0, dst=target_img_rope)
+
+            # 不再叠加稀疏散点，只保留连续的彩色热力图，便于整体 pattern 观察
 
         return vis_curr, vis_mems_no_rope, vis_mems_rope
 

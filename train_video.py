@@ -2,18 +2,25 @@ import os
 # 禁用 OpenCV 的 OpenCL 以避免在错误的 GPU 上创建上下文
 os.environ["OPENCV_OPENCL_DEVICE"] = "disabled"
 import cv2
-cv2.setUseOptimized(False)  # 可选：禁用特定优化以确保纯 CPU 运行
+cv2.setUseOptimized(False)  # 可选:禁用特定优化以确保纯 CPU 运行
 
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 import warnings
+import argparse
+from pathlib import Path
 from ultralytics.models.yolo.video.train import SAM2VideoTrainer
 
 warnings.filterwarnings("ignore")
 print(f"[LAUNCH] train_video.py pid={os.getpid()}")
 
 def train():
+    parser = argparse.ArgumentParser(description='Train YOLO Video Model')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Resume from checkpoint path (e.g., runs/train-video/yolo12-sam2-video/weights/last.pt)')
+    opt = parser.parse_args()
+    
     args = dict(
         model='ultralytics/cfg/models/12/yolo12-video-p2-early_memory_fusioin.yaml', 
         data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
@@ -50,6 +57,17 @@ def train():
         max_det=100,  # Limit max detections
         conf=0.01,    # Raise validation conf threshold
     )
+    
+    # Handle resume logic
+    if opt.resume:
+        resume_path = Path(opt.resume)
+        if resume_path.exists():
+            print(f"[RESUME] Resuming from: {resume_path}")
+            args['resume'] = True
+            args['model'] = str(resume_path)
+        else:
+            print(f"[ERROR] Checkpoint not found: {resume_path}")
+            return
     
     trainer = SAM2VideoTrainer(overrides=args)
     trainer.train()
