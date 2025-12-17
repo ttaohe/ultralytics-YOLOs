@@ -53,8 +53,7 @@ def train():
         baseline_mode=True,
 
         # NMS Performance Tuning
-        max_det= 100,  # Limit max detections to prevent NMS timeout during early training
-        conf= 0.01,    # Raise conf threshold for validation to reduce candidate count
+        conf= 0.25,    # Raise conf threshold for validation to reduce candidate count
         vid_stride=5,  # Enable sparse sampling for baseline too
     )
     
