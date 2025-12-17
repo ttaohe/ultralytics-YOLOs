@@ -26,7 +26,7 @@ def train():
         data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
         epochs=100,
         imgsz=640, 
-        batch=4,   
+        batch=8,   
         project='runs/train-baseline-sparse_data',
         name='yolo12n-baseline',
         device='0',
@@ -38,12 +38,12 @@ def train():
 
         
         # [EXPERIMENTAL] 验证时使用高分辨率 (1280)，训练时使用低分辨率 (640)
-        val_imgsz=1920,
+        val_imgsz=1280,
         
         # 保持与 Video 训练完全一致的增强参数
         mosaic=1.0, # 开启 Super Mosaic
-        mixup=0.0,
-        scale=0.0, # 开启 Scale 缩放 (范围 0.5-1.5)
+        mixup=0.5,
+        scale=0.5, # 开启 Scale 缩放 (范围 0.5-1.5)
         # degrees=0.0,
         # translate=0.0,
         # shear=0.0,

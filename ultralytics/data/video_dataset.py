@@ -84,7 +84,7 @@ class VisDroneVideoDataset(YOLODataset):
         # Filter indices based on vid_stride
         if self.vid_stride > 1 and self.augment:
              self._filter_dataset_by_stride()
-
+             
     # ---------------------------- Random window crop helpers ---------------------------- #
 
     def get_image_and_label(self, index: int) -> dict:

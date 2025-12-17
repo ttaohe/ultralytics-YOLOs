@@ -16,7 +16,7 @@ print(f"[LAUNCH] train_video.py pid={os.getpid()}")
 def train():
     args = dict(
         model='ultralytics/cfg/models/12/yolo12-video-sparse-p3.yaml', 
-        data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
+        data='ultralytics/cfg/datasets/VisDrone-vid-masked.yaml',  # 使用 Masked Dataset (Ignored Region removed)   
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
         batch=4,   
@@ -43,7 +43,7 @@ def train():
         scale=0.0,    # 开启 Scale 缩放 (范围 0.5-1.5)
         
         # Target Masking for Cross-Attention
-        mask_ratio=0.6, # Max ratio of object area to mask
+        mask_ratio=0.0, # Max ratio of object area to mask
         
         # Sparse Sampling
         vid_stride=5,  # 20% frames
