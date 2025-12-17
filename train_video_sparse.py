@@ -19,7 +19,7 @@ def train():
         data='ultralytics/cfg/datasets/VisDrone-vid-masked.yaml',  # 使用 Masked Dataset (Ignored Region removed)   
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
-        batch=4,   
+        batch=8,   
         project='runs/train-video-sparse-modelwdata',
         name='yolo12-sam2-sparse-p3',
         device='0',
@@ -36,11 +36,11 @@ def train():
         hsv_h=0.015,  # image HSV-Hue augmentation (fraction)
         hsv_s=0.7,    # image HSV-Saturation augmentation (fraction)
         hsv_v=0.4,    # image HSV-Value augmentation (fraction)
-        mosaic=0.0,   # 开启 Super Mosaic (已通过 Channel Stacking 支持时序同步)
-        mixup=0.0,  # 保持关闭
+        mosaic=1.0,   # 开启 Super Mosaic (已通过 Channel Stacking 支持时序同步)
+        mixup=0.5,  # 保持关闭
         translate=0.0, # 保持关闭，random_crop 已经提供了平移效果
 
-        scale=0.0,    # 开启 Scale 缩放 (范围 0.5-1.5)
+        scale=0.5,    # 开启 Scale 缩放 (范围 0.5-1.5)
         
         # Target Masking for Cross-Attention
         mask_ratio=0.0, # Max ratio of object area to mask

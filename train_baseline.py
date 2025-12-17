@@ -26,11 +26,11 @@ def train():
         data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
         epochs=100,
         imgsz=640, 
-        batch=8,   
+        batch=4,   
         project='runs/train-baseline-sparse_data',
         name='yolo12n-baseline',
         device='0',
-        workers=4,  # Reduce workers to avoid "ancdata" error (file descriptor limit)
+        workers=2,  # Reduce workers to avoid "ancdata" error (file descriptor limit)
         # random_crop_size 默认等于 imgsz，如果原图足够大，直接从原图 crop（不 resize）
         # 如果原图不够大，会先 resize 到 imgsz
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
@@ -70,7 +70,7 @@ def train():
             return
     else:
         # Fresh training
-        model = YOLO('/home/hetao/graduate/ultralytics-YOLOs/ultralytics/cfg/models/12/yolo12-baseline-p2.yaml').load('runs/train/train_yolov10l-p234_visroneDet_epoch300_imgsz800_batch4_mixup02_cutmix02/weights/best.pt')
+        model = YOLO('ultralytics/cfg/models/v10/yolov10l-p2-no-p5.yaml')
         model.train(**args)
 
 if __name__ == '__main__':

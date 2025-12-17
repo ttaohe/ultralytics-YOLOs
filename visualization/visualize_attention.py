@@ -76,7 +76,7 @@ class AttentionVisualizer:
             self.attn_module.forward = self.attn_module.original_attn_forward
             del self.attn_module.original_attn_forward
 
-    def patched_select_topk_features(self, features, coords, k_ratio=None):
+    def patched_select_topk_features(self, features, coords, query=None, k_ratio=None):
         """
         Patched method for SparseMemoryAttention.select_topk_features.
         'self' here refers to the SparseMemoryAttention instance.
@@ -100,7 +100,7 @@ class AttentionVisualizer:
         self._viz_indices_list.append(indices.detach().cpu())
         
         # Call original method
-        return self.original_select_topk(features, coords)
+        return self.original_select_topk(features, coords, query=query)
 
     def patched_attn_forward(self, q, k, v, q_coords=None, k_coords=None, num_k_exclude_rope=0):
         """

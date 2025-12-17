@@ -317,7 +317,7 @@ class YOLOMemoryAttention(nn.Module):
     YOLO Memory Attention module wrapping SAM2's MemoryAttention.
     """
 
-    def __init__(self, d_model=None, max_memory=8):
+    def __init__(self, c1, d_model=None, max_memory=8):
         super().__init__()
         self.requested_dim = d_model
         self.d_model = None
@@ -333,6 +333,9 @@ class YOLOMemoryAttention(nn.Module):
         
         # Allow subclass to override layer type
         self.layer_cls = YOLOMemoryAttentionLayer
+        
+        # Eager initialization
+        self._build_layers(c1)
 
     def _build_layers(self, in_channels):
         target_dim = self.requested_dim or in_channels
@@ -355,12 +358,6 @@ class YOLOMemoryAttention(nn.Module):
         """
         B_total, C, H, W = x.shape
         
-        if self.attn is None or self.d_model is None:
-            self._build_layers(x.shape[1])
-            # Ensure initialized layers match input dtype/device
-            if not self.training:
-                self.to(dtype=x.dtype, device=x.device)
-            
         if self.maskmem_tpos_enc is None:
             self.maskmem_tpos_enc = nn.Parameter(torch.zeros(self.max_memory, 1, 1, self.d_model, dtype=torch.float32, device=x.device))
             nn.init.trunc_normal_(self.maskmem_tpos_enc, std=0.02)
@@ -541,9 +538,10 @@ class SparseMemoryAttention(YOLOMemoryAttention):
     Sparse Memory Attention using Top-K selection with Global RoPE.
     Preserves spatial awareness by tracking coordinates of sparse tokens.
     """
-    def __init__(self, d_model=None, max_memory=8, topk_ratio=0.1, score_mode: str = "similarity_pooling"):
+    def __init__(self, c1, d_model=None, max_memory=8, topk_ratio=0.1, score_mode: str = "similarity_pooling"):
         """
         Args:
+            c1: input channels (passed automatically by parse_model).
             d_model: target feature dim (optional, inferred from in_channels).
             max_memory: maximum number of frames to keep in memory bank.
             topk_ratio: ratio of tokens to keep per frame.
@@ -552,7 +550,8 @@ class SparseMemoryAttention(YOLOMemoryAttention):
                 - "learned": use a learnable scoring head on features.
                 - "mix": combine learned score and L2 norm.
         """
-        super().__init__(d_model, max_memory)
+        # Pass c1 up to base to trigger build_layers
+        super().__init__(c1, d_model, max_memory)
         self.topk_ratio = topk_ratio
         self.score_mode = score_mode
         
@@ -696,11 +695,9 @@ class SparseMemoryAttention(YOLOMemoryAttention):
         """
         B_total, C, H, W = x.shape
         
-        if self.attn is None or self.d_model is None:
-            self._build_layers(x.shape[1])
-            # Ensure initialized layers match input dtype/device
-            if not self.training:
-                self.to(dtype=x.dtype, device=x.device)
+        # Eager init ensures layers exist. 
+        # But we still need to handle lazy tpos_enc if we want to be safe, 
+        # though build_layers is already done.
             
         # Generate Grid Coordinates for this batch
         # Assuming local inputs (0..H, 0..W). If random_crop is used, strict spatial consistency is lost 
