@@ -328,7 +328,7 @@ class YOLOMemoryAttention(nn.Module):
         self.maskmem_tpos_enc = None  # Temporal positional encoding
 
         self.memory_bank = []
-        self.max_memory = max_memory
+        self.max_memory = int(max_memory)
         self.time_steps = 1
         
         # Allow subclass to override layer type
@@ -747,7 +747,7 @@ class SparseMemoryAttention(YOLOMemoryAttention):
                     memory = curr
                     memory_coords = curr_coords
                 else:
-                    start = max(0, t - self.max_memory)
+                    start = max(0, int(t - self.max_memory))
                     mem_frames = mem_encoded[:, start:t] # (B, k, D, H, W)
                     k_frames = mem_frames.shape[1]
                     

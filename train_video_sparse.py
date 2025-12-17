@@ -15,15 +15,15 @@ print(f"[LAUNCH] train_video.py pid={os.getpid()}")
 
 def train():
     args = dict(
-        model='ultralytics/cfg/models/12/yolo12-video-sparse-p3.yaml', 
+        model='ultralytics/cfg/models/v10/yolov10l-video-sparse-p3.yaml', 
         data='ultralytics/cfg/datasets/VisDrone-vid-masked.yaml',  # 使用 Masked Dataset (Ignored Region removed)   
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
-        batch=8,   
+        batch=4,   
         project='runs/train-video-sparse-modelwdata',
-        name='yolo12-sam2-sparse-p3',
+        name='yolo10-sam2-sparse-p3',
         device='0',
-        workers=2,
+        workers=4,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop
         random_crop_prob=1.0,  # Re-enable Random Crop for verification
