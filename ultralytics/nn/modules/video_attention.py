@@ -541,7 +541,7 @@ class SparseMemoryAttention(YOLOMemoryAttention):
     Sparse Memory Attention using Top-K selection with Global RoPE.
     Preserves spatial awareness by tracking coordinates of sparse tokens.
     """
-    def __init__(self, d_model=None, max_memory=8, topk_ratio=0.1, score_mode: str = "learned"):
+    def __init__(self, d_model=None, max_memory=8, topk_ratio=0.1, score_mode: str = "similarity_pooling"):
         """
         Args:
             d_model: target feature dim (optional, inferred from in_channels).
@@ -601,10 +601,16 @@ class SparseMemoryAttention(YOLOMemoryAttention):
             num_layers=1,
         )
 
-    def select_topk_features(self, features, coords):
+    def select_topk_features(self, features, coords, query=None):
         """
-        Selects top-k features from (B, L, D) tensor based on L2 norm.
+        Selects top-k features from (B, L, D) tensor based on score_mode.
         Also returns corresponding coords (B, L, 2).
+        
+        Args:
+            features: (B, L, D) - Candidate features (Key/Memory)
+            coords: (B, L, 2) - Corresponding coordinates
+            query: (B, L_q, D) - Optional Query features for similarity-based selection.
+                   If None, may fallback to Self-Similarity or L2.
         """
         B, L, D = features.shape
         k = max(1, int(L * self.topk_ratio))
@@ -634,6 +640,39 @@ class SparseMemoryAttention(YOLOMemoryAttention):
                 self.score_head = nn.Linear(D, 1).to(features.device)
             learned_scores = self.score_head(features).squeeze(-1)
             scores = l2_scores + learned_scores
+        elif score_mode == "similarity_pooling":
+            # Query-Aware Scoring (Lightweight Probe)
+            # If query is None, fallback to Self-Similarity (using features as query)
+            if query is None:
+                query = features.clone()
+
+            # 1. Downsample Query (B, L_q, D) -> (B, k_probe, D)
+            # We use Adaptive Max Pooling to capture "peaks" of activation
+            B_q, L_q, D_q = query.shape
+            # Reshape to (B, D, H, W) for pooling? We need spatial info.
+            # Assuming L = H*W. If we don't have H/W, we can just reshape to (B, D, L) and pool 1D?
+            # Or assume square? L=6400 (80x80).
+            # Adaptive pool works on (N, C, L_in) -> (N, C, L_out).
+            
+            # Use 1D pooling for flexibility (works even if non-square or unknown shape)
+            # We want to pool tokens -> Reduce L dimension.
+            # Input to AdaptiveMaxPool1d: (N, C, L_in)
+            q_perm = query.permute(0, 2, 1) # (B, D, L)
+            
+            # Target size: 16*16 = 256 tokens
+            probe_size = 256
+            
+            # Probe (B, D, 256)
+            q_probe = F.adaptive_max_pool1d(q_perm, probe_size) 
+            q_probe = q_probe.permute(0, 2, 1) # (B, 256, D)
+            
+            # 2. Compute Attention/Similarity: Probe @ Key.T
+            # (B, 256, D) @ (B, D, L) -> (B, 256, L)
+            sim_matrix = torch.matmul(q_probe, features.transpose(1, 2))
+            
+            # 3. Aggregate: Max over Probe dimension
+            # "Is this key token strongly attended by ANY probe token?"
+            scores = sim_matrix.max(dim=1).values # (B, L)
         else:
             # Fallback to L2 if score_mode is invalid.
             scores = torch.norm(features, dim=-1)
@@ -731,7 +770,7 @@ class SparseMemoryAttention(YOLOMemoryAttention):
                         coords_flat = grid_seq[:, start + i] # (B, L, 2)
                         
                         # Sparsify NOW
-                        feat_sparse, coords_sparse = self.select_topk_features(feat_flat, coords_flat)
+                        feat_sparse, coords_sparse = self.select_topk_features(feat_flat, coords_flat, query=curr)
                         
                         mem_list.append(feat_sparse)
                         coord_list.append(coords_sparse)
@@ -788,7 +827,8 @@ class SparseMemoryAttention(YOLOMemoryAttention):
                 mem_flat = mem_encoded.flatten(2).permute(0, 2, 1) # (B, L, D)
                 
                 # Sparsify
-                mem_sparse, coords_sparse = self.select_topk_features(mem_flat, curr_coords)
+                # For storage, we don't have future query. Use Self-Similarity (query=None -> query=mem_flat)
+                mem_sparse, coords_sparse = self.select_topk_features(mem_flat, curr_coords, query=None)
                 
                 self.memory_bank.append((mem_sparse.detach(), coords_sparse.detach()))
                 

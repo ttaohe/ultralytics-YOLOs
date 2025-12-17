@@ -54,8 +54,7 @@ def train():
         # perspective=0.0, 
         
         # NMS Performance Tuning
-        max_det=100,  # Limit max detections
-        conf=0.01,    # Raise validation conf threshold
+        conf=0.25,    # Raise validation conf threshold
     )
     
     trainer = SAM2VideoTrainer(overrides=args)
