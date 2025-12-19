@@ -4,6 +4,9 @@ os.environ["OPENCV_OPENCL_DEVICE"] = "disabled"
 import cv2
 cv2.setUseOptimized(False)  # 可选：禁用特定优化以确保纯 CPU 运行
 
+import matplotlib
+matplotlib.use('Agg')  # Force headless backend
+
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -15,14 +18,14 @@ print(f"[LAUNCH] train_video.py pid={os.getpid()}")
 
 def train():
     args = dict(
-        model='ultralytics/cfg/models/v10/yolov10l-video-sparse-p3.yaml', 
+        model='ultralytics/cfg/models/v10/yolov10l-video-sparse-p3-ratio0_1.yaml', 
         data='ultralytics/cfg/datasets/VisDrone-vid-masked.yaml',  # 使用 Masked Dataset (Ignored Region removed)   
         epochs=100,
         imgsz=640,  # 目标输入尺寸，如果原图足够大，会直接从原图 crop 到该尺寸（保留小目标信息）
         batch=4,   
         project='runs/train-video-sparse-modelwdata',
         name='yolo10-sam2-sparse-p3',
-        device='0',
+        device='3',
         workers=4,
         use_homography=False,
         random_crop_size=640,  # 显式指定，确保开启 High-Res Crop

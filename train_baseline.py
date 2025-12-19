@@ -4,6 +4,9 @@ import os
 import cv2
 # cv2.setUseOptimized(False)  # 可选：禁用特定优化以确保纯 CPU 运行
 
+import matplotlib
+matplotlib.use('Agg')  # Force headless backend
+
 import torch
 torch.multiprocessing.set_sharing_strategy('file_system')
 
@@ -23,7 +26,7 @@ def train():
     
     # 使用相同的参数，但使用标准的 YOLOv8/12 Trainer (非 Video)
     args = dict(
-        data='ultralytics/cfg/datasets/VisDrone-vid.yaml',   
+        data='ultralytics/cfg/datasets/VisDrone-vid-masked.yaml',   
         epochs=100,
         imgsz=640, 
         batch=4,   
