@@ -102,7 +102,7 @@ from .transformer import (
     TransformerLayer,
 )
 from .trajectory import TrajectoryBlock, MotionAligner
-from .video_attention import YOLOMemoryAttention, SparseMemoryAttention
+from .video_attention import YOLOMemoryAttention, SparseMemoryAttention, VSAMemoryAttention
 
 __all__ = (
     "Conv",
@@ -184,4 +184,5 @@ __all__ = (
     "MotionAligner",
     "YOLOMemoryAttention",
     "SparseMemoryAttention",
+    "VSAMemoryAttention",
 )

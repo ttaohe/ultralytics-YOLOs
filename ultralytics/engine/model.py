@@ -12,7 +12,7 @@ from PIL import Image
 
 from ultralytics.cfg import TASK2DATA, get_cfg, get_save_dir
 from ultralytics.engine.results import Results
-from ultralytics.nn.tasks import guess_model_task, load_checkpoint, yaml_model_load
+# from ultralytics.nn.tasks import guess_model_task, load_checkpoint, yaml_model_load
 from ultralytics.utils import (
     ARGV,
     ASSETS,
@@ -257,6 +257,7 @@ class Model(torch.nn.Module):
             >>> model = Model()
             >>> model._new("yolo11n.yaml", task="detect", verbose=True)
         """
+        from ultralytics.nn.tasks import guess_model_task, yaml_model_load
         cfg_dict = yaml_model_load(cfg)
         self.cfg = cfg
         self.task = task or guess_model_task(cfg_dict)
@@ -294,6 +295,7 @@ class Model(torch.nn.Module):
         weights = checks.check_model_file_from_stem(weights)  # add suffix, i.e. yolo11n -> yolo11n.pt
 
         if str(weights).rpartition(".")[-1] == "pt":
+            from ultralytics.nn.tasks import load_checkpoint
             self.model, self.ckpt = load_checkpoint(weights)
             self.task = self.model.task
             self.overrides = self.model.args = self._reset_ckpt_args(self.model.args)
@@ -301,6 +303,7 @@ class Model(torch.nn.Module):
         else:
             weights = checks.check_file(weights)  # runs in all cases, not redundant with above call
             self.model, self.ckpt = weights, None
+            from ultralytics.nn.tasks import guess_model_task
             self.task = task or guess_model_task(weights)
             self.ckpt_path = weights
         self.overrides["model"] = weights
@@ -385,6 +388,7 @@ class Model(torch.nn.Module):
         self._check_is_pytorch_model()
         if isinstance(weights, (str, Path)):
             self.overrides["pretrained"] = weights  # remember the weights for DDP training
+            from ultralytics.nn.tasks import load_checkpoint
             weights, self.ckpt = load_checkpoint(weights)
         self.model.load(weights)
         return self
