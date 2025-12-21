@@ -935,6 +935,9 @@ class VSAMemoryAttention(YOLOMemoryAttention):
             layer=layer,
             num_layers=1,
         )
+        # Initialize T-Pos Encoding here to ensure it's a proper parameter for EMA/DDP
+        self.maskmem_tpos_enc = nn.Parameter(torch.zeros(self.max_memory, 1, 1, self.d_model))
+        nn.init.trunc_normal_(self.maskmem_tpos_enc, std=0.02)
 
     def reset_memory(self):
         self.key_bank = []
@@ -951,9 +954,12 @@ class VSAMemoryAttention(YOLOMemoryAttention):
         grid = torch.stack((grid_x, grid_y), dim=-1).float() 
         grid_flat = grid.reshape(-1, 2).unsqueeze(0).expand(B_total, -1, -1)
         
-        if self.maskmem_tpos_enc is None:
-            self.maskmem_tpos_enc = nn.Parameter(torch.zeros(self.max_memory, 1, 1, self.d_model, dtype=torch.float32, device=x.device))
-            nn.init.trunc_normal_(self.maskmem_tpos_enc, std=0.02)
+        grid_flat = grid.reshape(-1, 2).unsqueeze(0).expand(B_total, -1, -1)
+        
+        # maskmem_tpos_enc is initialized in _build_layers now. 
+        # Verify device placement (DDP handles this, but safety check?)
+        # if self.maskmem_tpos_enc.device != x.device:
+        #    self.maskmem_tpos_enc.to(x.device) # Should happen automatically
 
         if self.training:
             T = self.time_steps
