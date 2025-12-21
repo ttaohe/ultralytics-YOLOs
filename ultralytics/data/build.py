@@ -152,7 +152,9 @@ def build_yolo_dataset(
     if random_crop_size <= 0:
         random_crop_size = cfg.imgsz
     
-    return dataset(
+    # Build common kwargs shared by image/video datasets.
+    # IMPORTANT: only video datasets accept `vid_stride`. Passing it to BaseDataset will raise TypeError.
+    kwargs = dict(
         img_path=img_path,
         imgsz=cfg.imgsz,
         batch_size=batch,
@@ -171,8 +173,13 @@ def build_yolo_dataset(
         # Pass random_crop parameters if dataset supports them
         random_crop_size=random_crop_size if mode == "train" else 0,
         random_crop_prob=random_crop_prob if mode == "train" else 0.0,
-        vid_stride=getattr(cfg, 'vid_stride', 1),
     )
+
+    # Video-only args
+    if dataset is VisDroneVideoDataset:
+        kwargs["vid_stride"] = getattr(cfg, "vid_stride", 1)
+
+    return dataset(**kwargs)
 
 
 def build_grounding(

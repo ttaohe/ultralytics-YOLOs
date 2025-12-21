@@ -1,5 +1,5 @@
 # MOMT Dataset - Camera View 2
-path: /home/hetao/graduate/data/MOMT-yolo/camera2/
+path: /home/hetao/graduate/data/MDMT-yolo/camera2/
 train: images/train
 val: images/val
 test: images/test

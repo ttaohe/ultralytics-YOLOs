@@ -196,6 +196,7 @@ CFG_INT_KEYS = frozenset(
         "close_mosaic",
         "mask_ratio",
         "max_det",
+        "time_steps",
         "vid_stride",
         "line_width",
         "nbs",
