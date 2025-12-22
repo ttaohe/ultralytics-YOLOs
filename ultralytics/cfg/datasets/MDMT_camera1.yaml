@@ -6,4 +6,4 @@ test: images/test
 
 # Classes
 nc: 4
-names: ['car', 'person', 'bicycle', 'bus']
+names: ['bicycle', 'bus', 'car', 'person']
