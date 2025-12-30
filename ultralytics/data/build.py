@@ -118,6 +118,18 @@ def seed_worker(worker_id: int):  # noqa
     worker_seed = torch.initial_seed() % 2**32
     np.random.seed(worker_seed)
     random.seed(worker_seed)
+    # OpenCV in multi-process dataloaders can deadlock or oversubscribe CPU threads.
+    # Force single-threaded OpenCV in each worker to improve stability.
+    try:
+        import cv2
+
+        cv2.setNumThreads(0)
+        try:
+            cv2.ocl.setUseOpenCL(False)
+        except Exception:
+            pass
+    except Exception:
+        pass
     try:
         # Debug: log each DataLoader worker process
         LOGGER.debug(f"[DL-WORKER] worker_id={worker_id} pid={os.getpid()} RANK={RANK}")
@@ -240,10 +252,43 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
     except Exception:
         # Debug 日志失败不影响训练
         pass
+
+    # ============ DDP DEBUG: Dataset size check ============
+    if rank != -1:
+        dataset_len = len(dataset)
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        LOGGER.info(f"[DDP-DATA] RANK={rank} dataset_len={dataset_len} world_size={world_size} "
+                   f"samples_per_rank={dataset_len // world_size} remainder={dataset_len % world_size}")
+    # ======================================================
+
     sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)
-    return InfiniteDataLoader(
+
+    # ============ DDP FIX: Force drop_last=True for DDP ============
+    # In DDP, we need to ensure all ranks get the same number of batches
+    # DistributedSampler divides dataset by world_size, so we need:
+    # drop_last=True to ensure (dataset_len // world_size) % batch_size == 0
+    actual_drop_last = drop_last
+    if rank != -1:  # DDP training
+        world_size = int(os.environ.get("WORLD_SIZE", 1))
+        samples_per_rank = len(dataset) // world_size
+        # Force drop_last=True if samples_per_rank is not divisible by batch_size
+        # This ensures all ranks get the same number of batches
+        if samples_per_rank % batch != 0:
+            actual_drop_last = True
+            LOGGER.warning(f"[DDP-DATA] RANK={rank} Forcing drop_last=True: "
+                          f"samples_per_rank={samples_per_rank} batch={batch} "
+                          f"(not divisible, would cause uneven batches across ranks)")
+
+    # Optional: dataloader timeout (only effective when num_workers > 0).
+    # Useful to fail-fast instead of "hanging forever" if a worker gets stuck in image decoding/IO.
+    try:
+        dl_timeout = int(os.getenv("ULTRALYTICS_DATALOADER_TIMEOUT", "0"))
+    except Exception:
+        dl_timeout = 0
+
+    dataloader = InfiniteDataLoader(
         dataset=dataset,
         batch_size=batch,
         shuffle=shuffle and sampler is None,
@@ -255,8 +300,17 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
         collate_fn=getattr(dataset, "collate_fn", None),
         worker_init_fn=seed_worker,
         generator=generator,
-        drop_last=drop_last and len(dataset) % batch != 0,
+        drop_last=actual_drop_last,
+        timeout=dl_timeout if nw > 0 else 0,
     )
+
+    # ============ DDP DEBUG: Dataloader info ============
+    if rank != -1:
+        LOGGER.info(f"[DDP-DATA] RANK={rank} dataloader batch_size={batch} drop_last={dataloader.drop_last} "
+                   f"len(dataset)={len(dataset)} len(dataloader)={len(dataloader)}")
+    # ==============================================
+
+    return dataloader
 
 
 def check_source(source):

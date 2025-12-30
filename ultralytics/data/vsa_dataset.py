@@ -4,6 +4,8 @@ import torch
 import cv2
 import random
 import copy
+import os
+import time
 from pathlib import Path
 from ultralytics.utils.ops import xywhn2xyxy, xyxy2xywhn
 from ultralytics.data.dataset import YOLODataset
@@ -79,30 +81,35 @@ class VSAVideoDataset(YOLODataset):
     def _filter_dataset_by_stride(self):
         """
         Create sparse sampling indices to reduce training iterations.
-        
+
         We keep ALL frames in im_files/labels for history loading,
         but only iterate over a subset of "current frames" (every Nth frame per video).
-        
+
         Example: vid_stride=5, dataset=24198 -> iterate ~4840 samples
                  but can still load all 24198 frames for history
         """
         n_total = len(self.im_files)
         sample_indices = []
-        
+
         # Group indices by video
         unique_vids = np.unique(self.video_indices)
         for vid_id in unique_vids:
             # Get indices for this video
             vid_mask = self.video_indices == vid_id
             indices = np.where(vid_mask)[0]
-            
+
             # Select every Nth frame as "current frame" candidates
             # Start from the last frame of each stride group to ensure we have history
             # Example: indices=[0,1,2,3,4,5,6,7,8,9], stride=5 -> [4, 9]
             selected = indices[self.vid_stride - 1::self.vid_stride]
             sample_indices.extend(selected.tolist())
-        
+
         self._sample_indices = np.array(sorted(sample_indices))
+
+        # IMPORTANT: Log the size for debugging DDP issues
+        LOGGER.info(f"{self.prefix}Sparse Video Sampling: vid_stride={self.vid_stride}, "
+                   f"total={n_total}, sampled={len(self._sample_indices)}")
+        LOGGER.warning(f"{self.prefix}Dataset size {len(self._sample_indices)} may be too small for multi-GPU DDP!")
         
         LOGGER.info(f"{self.prefix}Sparse Video Sampling enabled: vid_stride={self.vid_stride}. "
                    f"Training on {len(self._sample_indices)} samples out of {n_total} total frames "
@@ -136,6 +143,51 @@ class VSAVideoDataset(YOLODataset):
             indices: List of frame indices
             label_info: Updated label dict with transformed bboxes and im_file list
         """
+        # Debug: identify the exact image file that a DDP rank hangs on (epoch=1 first batch).
+        # IMPORTANT: when num_workers>0, dataset code runs in worker subprocesses; print() may not show up.
+        # So we also write to a per-rank log file under /tmp.
+        debug_epoch = getattr(self, "_debug_epoch", -1)  # may be unavailable inside DataLoader workers
+        # In DDP, DataLoader workers won't see trainer-injected attrs reliably; fall back to env RANK.
+        debug_rank = getattr(self, "_debug_rank", None)
+        if debug_rank is None or debug_rank == -1:
+            try:
+                debug_rank = int(os.getenv("RANK", -1))
+            except Exception:
+                debug_rank = -1
+        debug_count = getattr(self, "_debug_count", 0)
+        # Default: a shared per-rank log file (append-only). This works even with multiple workers.
+        run_id = os.getenv("VSA_RUN_ID", "")
+        run_prefix = f"vsa_data_{run_id}_" if run_id else "vsa_data_"
+        debug_log_path = os.getenv("VSA_DATA_DEBUG_LOG", f"/tmp/{run_prefix}rank{debug_rank}.log")
+
+        def _dbg(msg: str):
+            try:
+                with open(debug_log_path, "a", encoding="utf-8") as f:
+                    f.write(msg + "\n")
+            except Exception:
+                pass
+
+        # Log slow OpenCV IO/ops to help pinpoint sporadic DDP stalls.
+        # If a worker hangs inside cv2.imread/cv2.resize, the last written line typically identifies the file.
+        try:
+            warn_s = float(os.getenv("VSA_CV2_WARN_S", "1.0"))
+        except Exception:
+            warn_s = 1.0
+
+        trace = os.getenv("VSA_DATA_TRACE", "0") == "1"
+
+        def _timed(tag: str, fn, *args, **kwargs):
+            if trace:
+                _dbg(f"[VSA-DATA-RANK{debug_rank}] BEGIN {tag} pid={os.getpid()}")
+            t0 = time.time()
+            out = fn(*args, **kwargs)
+            dt = time.time() - t0
+            if dt >= warn_s:
+                _dbg(f"[VSA-DATA-RANK{debug_rank}] SLOW {tag} dt={dt:.3f}s pid={os.getpid()}")
+            if trace:
+                _dbg(f"[VSA-DATA-RANK{debug_rank}] END {tag} dt={dt:.3f}s pid={os.getpid()}")
+            return out
+
         vid_id = self.video_indices[idx]
         
         # Collect indices backwards with stride (sparse sampling)
@@ -158,7 +210,24 @@ class VSAVideoDataset(YOLODataset):
         crop_w, crop_h = 0, 0
         
         # Read first image to get original dimensions
-        im0_ref = cv2.imread(self.im_files[indices[-1]])
+        # Always log once per worker process by default, because epoch/rank attrs may not propagate to workers.
+        # If you want to disable this, set VSA_DATA_DEBUG=0 explicitly.
+        debug_enabled = os.getenv("VSA_DATA_DEBUG", "1") == "1"
+        if debug_enabled and debug_count < 1:
+            # NOTE: keep both print() and file log. print() helps in workers=0; file log helps in workers>0.
+            msg0 = (
+                f"[VSA-DATA-RANK{debug_rank}] pid={os.getpid()} load_clip idx={idx} vid_id={vid_id} indices={indices} "
+                f"last={self.im_files[indices[-1]]}"
+            )
+            print(msg0, flush=True)
+            _dbg(msg0)
+            for j, ii in enumerate(indices):
+                msg = f"[VSA-DATA-RANK{debug_rank}]   cv2.imread[{j}] {self.im_files[ii]}"
+                print(msg, flush=True)
+                _dbg(msg)
+            self._debug_count = debug_count + 1
+
+        im0_ref = _timed(f"cv2.imread(ref) file={self.im_files[indices[-1]]}", cv2.imread, self.im_files[indices[-1]])
         if im0_ref is None:
             raise FileNotFoundError(f"Image Not Found {self.im_files[indices[-1]]}")
         h0, w0 = im0_ref.shape[:2]
@@ -181,7 +250,7 @@ class VSAVideoDataset(YOLODataset):
         # 1. Process Images
         for i in indices:
             f = self.im_files[i]
-            im = cv2.imread(f)
+            im = _timed(f"cv2.imread file={f}", cv2.imread, f)
             if im is None:
                 raise FileNotFoundError(f"Image Not Found {f}")
             
@@ -194,7 +263,13 @@ class VSAVideoDataset(YOLODataset):
             h, w = im.shape[:2]
             r = self.imgsz / max(h, w)
             if r != 1:
-                im = cv2.resize(im, (int(w * r), int(h * r)), interpolation=cv2.INTER_LINEAR)
+                im = _timed(
+                    f"cv2.resize file={f}",
+                    cv2.resize,
+                    im,
+                    (int(w * r), int(h * r)),
+                    interpolation=cv2.INTER_LINEAR,
+                )
             
             # Pad to square
             h, w = im.shape[:2]
@@ -203,7 +278,17 @@ class VSAVideoDataset(YOLODataset):
             left, right = dw // 2, dw - (dw // 2)
             
             if dh > 0 or dw > 0:
-                im = cv2.copyMakeBorder(im, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+                im = _timed(
+                    f"cv2.copyMakeBorder file={f}",
+                    cv2.copyMakeBorder,
+                    im,
+                    top,
+                    bottom,
+                    left,
+                    right,
+                    cv2.BORDER_CONSTANT,
+                    value=(114, 114, 114),
+                )
 
             imgs.append(im)
         
@@ -271,6 +356,37 @@ class VSAVideoDataset(YOLODataset):
                 - 'ori_shape': Original image shape
                 - 'resized_shape': Resized image shape
         """
+        # Debug logger (works inside DataLoader workers)
+        try:
+            debug_rank = int(os.getenv("RANK", -1))
+        except Exception:
+            debug_rank = -1
+        run_id = os.getenv("VSA_RUN_ID", "")
+        run_prefix = f"vsa_data_{run_id}_" if run_id else "vsa_data_"
+        debug_log_path = os.getenv("VSA_DATA_DEBUG_LOG", f"/tmp/{run_prefix}rank{debug_rank}.log")
+        debug_enabled = os.getenv("VSA_DATA_DEBUG", "1") == "1"
+        try:
+            warn_s = float(os.getenv("VSA_CV2_WARN_S", "1.0"))
+        except Exception:
+            warn_s = 1.0
+
+        def _dbg(msg: str):
+            if not debug_enabled:
+                return
+            try:
+                with open(debug_log_path, "a", encoding="utf-8") as f:
+                    f.write(msg + "\n")
+            except Exception:
+                pass
+
+        def _timed(tag: str, fn, *args, **kwargs):
+            t0 = time.time()
+            out = fn(*args, **kwargs)
+            dt = time.time() - t0
+            if debug_enabled and dt >= warn_s:
+                _dbg(f"[VSA-DATA-RANK{debug_rank}] SLOW {tag} dt={dt:.3f}s pid={os.getpid()}")
+            return out
+
         # Map index to actual frame index if sparse sampling is enabled
         if hasattr(self, '_sample_indices'):
             real_index = self._sample_indices[index]
@@ -282,19 +398,26 @@ class VSAVideoDataset(YOLODataset):
         
         # 2. Load Raw Clip (Augmented) - label_info is modified in-place
         # Use real_index to load clip starting from the actual frame position
-        raw_imgs, indices, label_info = self.load_clip(real_index, self.time_steps, label_info)
+        raw_imgs, indices, label_info = _timed(
+            f"load_clip real_index={real_index} len={self.time_steps}",
+            self.load_clip,
+            real_index,
+            self.time_steps,
+            label_info,
+        )
         
         # 3. Stack and Format Images
         # Convert to Tensor (T*3, H, W) format
         processed_imgs = []
         for im in raw_imgs:
             # BGR to RGB, HWC to CHW
-            im = im[:, :, ::-1].transpose(2, 0, 1) 
-            im = np.ascontiguousarray(im)
+            im = _timed("bgr2rgb_transpose", lambda x: x[:, :, ::-1].transpose(2, 0, 1), im)
+            im = _timed("np.ascontiguousarray", np.ascontiguousarray, im)
             processed_imgs.append(im)
             
-        stack = np.concatenate(processed_imgs, axis=0)  # (T*3, H, W)
-        stack = torch.from_numpy(stack).float() / 255.0
+        stack = _timed("np.concatenate", np.concatenate, processed_imgs, axis=0)  # (T*3, H, W)
+        stack = _timed("torch.from_numpy(stack).float()", lambda x: torch.from_numpy(x).float(), stack)
+        stack = _timed("stack_div_255", lambda x: x / 255.0, stack)
         
         # 4. Get bboxes (already transformed by load_clip)
         bboxes = label_info.get('bboxes', np.zeros((0, 4), dtype=np.float32))
@@ -309,8 +432,8 @@ class VSAVideoDataset(YOLODataset):
         # 5. Build output dict
         data = {
             'img': stack,
-            'cls': torch.from_numpy(cls).float(),
-            'bboxes': torch.from_numpy(bboxes).float(),
+            'cls': _timed("torch.from_numpy(cls).float()", lambda x: torch.from_numpy(x).float(), cls),
+            'bboxes': _timed("torch.from_numpy(bboxes).float()", lambda x: torch.from_numpy(x).float(), bboxes),
             'ori_shape': label_info.get('ori_shape', (self.imgsz, self.imgsz)),
             'resized_shape': (self.imgsz, self.imgsz),
             'batch_idx': torch.zeros(len(cls)),

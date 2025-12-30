@@ -147,7 +147,8 @@ class BaseValidator:
             self.data = trainer.data
             # Force FP16 val during training
             self.args.half = self.device.type != "cpu" and trainer.amp
-            model = trainer.ema.ema or trainer.model
+            # Handle EMA being None (disabled for some trainers like VSA)
+            model = (trainer.ema.ema if trainer.ema else None) or trainer.model
             if trainer.args.compile and hasattr(model, "_orig_mod"):
                 model = model._orig_mod  # validate non-compiled original model to avoid issues
             model = model.half() if self.args.half else model.float()
@@ -218,7 +219,8 @@ class BaseValidator:
             # Loss
             with dt[2]:
                 if self.training:
-                    self.loss += model.loss(batch, preds)[1]
+                    # Use unwrap_model to handle DDP wrapped models
+                    self.loss += unwrap_model(model).loss(batch, preds)[1]
 
             # Postprocess
             with dt[3]:

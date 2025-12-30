@@ -398,6 +398,10 @@ class BaseTrainer:
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
             self.tloss = None
             for i, batch in pbar:
+                # ============ DDP DEBUG: Batch iteration (use print for immediate flush) ============
+                if i >= nb - 2 or i <= 1:  # Log first 2 and last 2 batches
+                    print(f"[DDP-DEBUG-RANK{RANK}] Batch {i}/{nb}, epoch={epoch}", flush=True)
+                # ===================================================
                 self.run_callbacks("on_train_batch_start")
                 # Warmup
                 ni = i + nb * epoch
@@ -429,7 +433,13 @@ class BaseTrainer:
                     )
 
                 # Backward
+                # ============ DDP DEBUG: Before backward ============
+                if i >= nb - 2 or i <= 1:
+                    print(f"[DDP-DEBUG-RANK{RANK}] Before backward, batch {i}/{nb}, epoch={epoch}", flush=True)
+                # ================================================
                 self.scaler.scale(self.loss).backward()
+                if i >= nb - 2 or i <= 1:
+                    print(f"[DDP-DEBUG-RANK{RANK}] After backward, batch {i}/{nb}, epoch={epoch}", flush=True)
 
                 # Optimize - https://pytorch.org/docs/master/notes/amp_examples.html
                 if ni - last_opt_step >= self.accumulate:
@@ -465,11 +475,37 @@ class BaseTrainer:
 
                 self.run_callbacks("on_train_batch_end")
 
+            # ============ DDP DEBUG: Training loop ended ============
+            import os
+            rank_env = int(os.getenv("RANK", -1))
+            print(f"[DDP-DEBUG-RANK{rank_env}] Training loop ENDED (for i, batch completed), epoch={epoch}, total_batches={nb}", flush=True)
+            # =====================================================
+
+            # ============ DDP FIX: Explicit barrier to ensure gradient sync completion ============
+            # When using find_unused_parameters=True, DDP may have pending gradient reductions
+            # This barrier ensures all ranks finish their gradient reductions before proceeding
+            if RANK != -1:
+                print(f"[DDP-DEBUG-RANK{rank_env}] Before DDP gradient sync barrier, epoch={epoch}", flush=True)
+                dist.barrier()
+                print(f"[DDP-DEBUG-RANK{rank_env}] After DDP gradient sync barrier, epoch={epoch}", flush=True)
+            # ====================================================================================
+
+            print(f"[DDP-DEBUG-RANK{rank_env}] Before self.lr assignment, epoch={epoch}", flush=True)
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
+            print(f"[DDP-DEBUG-RANK{rank_env}] After self.lr assignment, epoch={epoch}", flush=True)
+
+            # ============ DDP DEBUG: Before on_train_epoch_end callback ============
+            print(f"[DDP-DEBUG-RANK{rank_env}] Before run_callbacks('on_train_epoch_end'), epoch={epoch}", flush=True)
             self.run_callbacks("on_train_epoch_end")
+            LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] After run_callbacks('on_train_epoch_end'), epoch={epoch}")
+            # =============================================================
             if RANK in {-1, 0}:
+                # ============ DDP DEBUG: RANK0 validation start ============
+                LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] RANK0 entering validation block, epoch={epoch}")
+                # =====================================================
                 final_epoch = epoch + 1 >= self.epochs
-                self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
+                if self.ema:  # EMA may be disabled for some trainers (e.g., VSA)
+                    self.ema.update_attr(self.model, include=["yaml", "nc", "args", "names", "stride", "class_weights"])
 
                 # Validation
                 if self.args.val or final_epoch or self.stopper.possible_stop or self.stop:
@@ -495,14 +531,26 @@ class BaseTrainer:
                 self._setup_scheduler()
                 self.scheduler.last_epoch = self.epoch  # do not move
                 self.stop |= epoch >= self.epochs  # stop if exceeded epochs
+            # ============ DDP DEBUG: Before on_fit_epoch_end callback ============
+            LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] Before run_callbacks('on_fit_epoch_end'), epoch={epoch}")
+            # ============================================================
             self.run_callbacks("on_fit_epoch_end")
+            LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] After run_callbacks('on_fit_epoch_end'), epoch={epoch}")
+            # ============ DDP DEBUG: Before _clear_memory ============
+            LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] Before _clear_memory(0.5), epoch={epoch}")
+            # =====================================================
             self._clear_memory(0.5)  # clear if memory utilization > 50%
+            LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] After _clear_memory(0.5), epoch={epoch}")
 
             # Early Stopping
             if RANK != -1:  # if DDP training
+                # ============ DDP DEBUG: Before broadcast_object_list ============
+                LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] Before dist.broadcast_object_list, epoch={epoch}, self.stop={self.stop}")
+                # =========================================================
                 broadcast_list = [self.stop if RANK == 0 else None]
                 dist.broadcast_object_list(broadcast_list, 0)  # broadcast 'stop' to all ranks
                 self.stop = broadcast_list[0]
+                LOGGER.info(f"[DDP-DEBUG-RANK{rank_env}] After dist.broadcast_object_list, self.stop={self.stop}")
             if self.stop:
                 break  # must break all DDP ranks
             epoch += 1
@@ -544,17 +592,32 @@ class BaseTrainer:
 
     def _clear_memory(self, threshold: float = None):
         """Clear accelerator memory by calling garbage collector and emptying cache."""
+        import os
+        rank_env = int(os.getenv("RANK", -1))
+        print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory START, threshold={threshold}", flush=True)
+
         if threshold:
             assert 0 <= threshold <= 1, "Threshold must be between 0 and 1."
-            if self._get_memory(fraction=True) <= threshold:
+            mem_frac = self._get_memory(fraction=True)
+            print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory: mem_frac={mem_frac}, threshold={threshold}", flush=True)
+            if mem_frac <= threshold:
+                print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory: early return (memory OK)", flush=True)
                 return
+
+        print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory: calling gc.collect()", flush=True)
         gc.collect()
+
         if self.device.type == "mps":
+            print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory: calling torch.mps.empty_cache()", flush=True)
             torch.mps.empty_cache()
         elif self.device.type == "cpu":
+            print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory: CPU device, skipping", flush=True)
             return
         else:
+            print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory: calling torch.cuda.empty_cache()", flush=True)
             torch.cuda.empty_cache()
+
+        print(f"[DDP-DEBUG-RANK{rank_env}] _clear_memory DONE", flush=True)
 
     def read_results_csv(self):
         """Read results.csv into a dictionary using polars or pandas."""
@@ -579,13 +642,23 @@ class BaseTrainer:
 
         # Serialize ckpt to a byte buffer once (faster than repeated torch.save() calls)
         buffer = io.BytesIO()
+        
+        # Handle EMA being None (disabled for some trainers like VSA)
+        if self.ema:
+            ema_state = deepcopy(unwrap_model(self.ema.ema)).half()
+            ema_updates = self.ema.updates
+        else:
+            # Fallback to model itself when EMA is disabled
+            ema_state = deepcopy(unwrap_model(self.model)).half()
+            ema_updates = 0
+        
         torch.save(
             {
                 "epoch": self.epoch,
                 "best_fitness": self.best_fitness,
                 "model": None,  # resume and final checkpoints derive from EMA
-                "ema": deepcopy(unwrap_model(self.ema.ema)).half(),
-                "updates": self.ema.updates,
+                "ema": ema_state,
+                "updates": ema_updates,
                 "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
                 "train_args": vars(self.args),  # save as dict
                 "train_metrics": {**self.metrics, **{"fitness": self.fitness}},

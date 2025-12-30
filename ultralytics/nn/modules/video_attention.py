@@ -766,17 +766,105 @@ class SparseMemoryAttention(YOLOMemoryAttention):
             num_layers=1,
         )
     
+    # def select_topk_features(self, features, coords, query=None):
+    #     B, L, D = features.shape
+    #     k = max(1, int(L * self.topk_ratio))
+    #     scores = self.score_head(features).squeeze(-1) # Default
+    #     topk_scores, topk_indices = torch.topk(scores, k, dim=1) 
+        
+    #     topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, D)
+    #     features_sparse = torch.gather(features, 1, topk_indices_expanded)
+        
+    #     topk_indices_coords = topk_indices.unsqueeze(-1).expand(-1, -1, 2)
+    #     coords_sparse = torch.gather(coords, 1, topk_indices_coords)
+    #     return features_sparse, coords_sparse
+    
     def select_topk_features(self, features, coords, query=None):
+        """
+        Selects top-k features from (B, L, D) tensor based on score_mode.
+        Also returns corresponding coords (B, L, 2).
+        
+        Args:
+            features: (B, L, D) - Candidate features (Key/Memory)
+            coords: (B, L, 2) - Corresponding coordinates
+            query: (B, L_q, D) - Optional Query features for similarity-based selection.
+                   If None, may fallback to Self-Similarity or L2.
+        """
         B, L, D = features.shape
         k = max(1, int(L * self.topk_ratio))
-        scores = self.score_head(features).squeeze(-1) # Default
-        topk_scores, topk_indices = torch.topk(scores, k, dim=1) 
+
+        # ------------------------------------------------------------------
+        # Scoring: decide which tokens are important enough to keep.
+        # ------------------------------------------------------------------
+        # NOTE: Older checkpoints (训练于本改动之前) 在反序列化时不会自动拥有
+        # `score_mode` / `score_head` 属性。为兼容这些模型，这里做一次
+        # 运行时回退：如果没有 score_mode，则直接退回到原始 L2 行为。
+        score_mode = getattr(self, "score_mode", "l2")
+
+        if score_mode == "l2":
+            # Original behavior: use L2 norm as importance score.
+            scores = torch.norm(features, dim=-1)  # (B, L)
+        elif score_mode == "learned":
+            # Pure learnable scoring from a small linear head.
+            # features: (B, L, D) -> (B, L)
+            if not hasattr(self, "score_head"):
+                # 兼容旧权重：按当前通道数动态创建一个线性头
+                self.score_head = nn.Linear(D, 1).to(features.device)
+            scores = self.score_head(features).squeeze(-1)
+        elif score_mode == "mix":
+            # Mix learned score and L2 norm (simple additive fusion).
+            l2_scores = torch.norm(features, dim=-1)
+            if not hasattr(self, "score_head"):
+                self.score_head = nn.Linear(D, 1).to(features.device)
+            learned_scores = self.score_head(features).squeeze(-1)
+            scores = l2_scores + learned_scores
+        elif score_mode == "similarity_pooling":
+            # Query-Aware Scoring (Lightweight Probe)
+            # If query is None, fallback to Self-Similarity (using features as query)
+            if query is None:
+                query = features.clone()
+
+            # 1. Downsample Query (B, L_q, D) -> (B, k_probe, D)
+            # We use Adaptive Max Pooling to capture "peaks" of activation
+            B_q, L_q, D_q = query.shape
+            # Reshape to (B, D, H, W) for pooling? We need spatial info.
+            # Assuming L = H*W. If we don't have H/W, we can just reshape to (B, D, L) and pool 1D?
+            # Or assume square? L=6400 (80x80).
+            # Adaptive pool works on (N, C, L_in) -> (N, C, L_out).
+            
+            # Use 1D pooling for flexibility (works even if non-square or unknown shape)
+            # We want to pool tokens -> Reduce L dimension.
+            # Input to AdaptiveMaxPool1d: (N, C, L_in)
+            q_perm = query.permute(0, 2, 1) # (B, D, L)
+            
+            # Target size: 16*16 = 256 tokens
+            probe_size = 256
+            
+            # Probe (B, D, 256)
+            q_probe = F.adaptive_max_pool1d(q_perm, probe_size) 
+            q_probe = q_probe.permute(0, 2, 1) # (B, 256, D)
+            
+            # 2. Compute Attention/Similarity: Probe @ Key.T
+            # (B, 256, D) @ (B, D, L) -> (B, 256, L)
+            sim_matrix = torch.matmul(q_probe, features.transpose(1, 2))
+            
+            # 3. Aggregate: Max over Probe dimension
+            # "Is this key token strongly attended by ANY probe token?"
+            scores = sim_matrix.max(dim=1).values # (B, L)
+        else:
+            # Fallback to L2 if score_mode is invalid.
+            scores = torch.norm(features, dim=-1)
+
+        topk_scores, topk_indices = torch.topk(scores, k, dim=1) # (B, k)
         
+        # Gather Features (B, k, D)
         topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, D)
         features_sparse = torch.gather(features, 1, topk_indices_expanded)
         
+        # Gather Coords (B, k, 2)
         topk_indices_coords = topk_indices.unsqueeze(-1).expand(-1, -1, 2)
         coords_sparse = torch.gather(coords, 1, topk_indices_coords)
+        
         return features_sparse, coords_sparse
 
     def forward(self, x):
@@ -862,7 +950,7 @@ class SparseMemoryAttention(YOLOMemoryAttention):
              
              # Update bank
              if len(self.memory_bank) >= self.max_memory:
-                 self.memory_bank.pop(0)
+                self.memory_bank.pop(0)
              self.memory_bank.append((m_sparse, c_sparse))
         
         out = out.permute(0, 2, 1).reshape(B_total, self.d_model, H, W)
@@ -940,79 +1028,76 @@ class VSAMemoryAttention(YOLOMemoryAttention):
         nn.init.trunc_normal_(self.maskmem_tpos_enc, std=0.02)
 
     def reset_memory(self):
+        import os
+        rank_env = int(os.getenv("RANK", -1))
+        from ultralytics.utils import LOGGER
+        LOGGER.info(f"[VSA-RANK{rank_env}] VSAMemoryAttention.reset_memory(): START, len(key_bank)={len(self.key_bank)}, len(val_bank)={len(self.val_bank)}, len(pos_bank)={len(self.pos_bank)}")
         self.key_bank = []
         self.val_bank = []
         self.pos_bank = []
+        LOGGER.info(f"[VSA-RANK{rank_env}] VSAMemoryAttention.reset_memory(): DONE")
 
     def forward(self, x):
         B_total, C, H, W = x.shape
         x_proj = self.proj_in(x)
-        x_flat = x_proj.flatten(2).permute(0, 2, 1) 
+        x_flat = x_proj.flatten(2).permute(0, 2, 1)  # (B, H*W, D)
         
-        # Coords
-        grid_y, grid_x = torch.meshgrid(torch.arange(H, device=x.device), torch.arange(W, device=x.device), indexing='ij')
-        grid = torch.stack((grid_x, grid_y), dim=-1).float() 
-        grid_flat = grid.reshape(-1, 2).unsqueeze(0).expand(B_total, -1, -1)
-        
-        grid_flat = grid.reshape(-1, 2).unsqueeze(0).expand(B_total, -1, -1)
-        
-        # maskmem_tpos_enc is initialized in _build_layers now. 
-        # Verify device placement (DDP handles this, but safety check?)
-        # if self.maskmem_tpos_enc.device != x.device:
-        #    self.maskmem_tpos_enc.to(x.device) # Should happen automatically
+        # Create grid coordinates (shared across batch)
+        grid_y, grid_x = torch.meshgrid(
+            torch.arange(H, device=x.device), 
+            torch.arange(W, device=x.device), 
+            indexing='ij'
+        )
+        grid_flat = torch.stack((grid_x, grid_y), dim=-1).float().reshape(-1, 2)
+        grid_flat = grid_flat.unsqueeze(0).expand(B_total, -1, -1)  # (B, H*W, 2)
 
         if self.training:
             T = self.time_steps
             B = B_total // T
             x_seq = x_flat.view(B, T, -1, self.d_model)
             grid_seq = grid_flat.view(B, T, -1, 2)
-            mem_encoded = self.memory_encoder(x).view(B, T, self.d_model, H, W) # Full/Coarse? Using full for keys now
-            # TODO: Add explicit compression if 'block_size' > 1. For now assume block_size=1 (pixel level).
+            
+            # Encode memory features once for all frames
+            mem_encoded = self.memory_encoder(x).view(B, T, self.d_model, H, W)
             
             out_seq = []
-            
-            # History buffer for training (simulating bank)
-            history_keys = []
-            history_vals = []
+            history_feats = []  # Store encoded features (used for both keys and values)
             history_pos = []
             
             for t in range(T):
-                curr = x_seq[:, t]
-                curr_coords = grid_seq[:, t] # (B, L, 2)
+                curr = x_seq[:, t]  # (B, L, D)
+                curr_coords = grid_seq[:, t]  # (B, L, 2)
                 
-                # Construct Global Memory from history
-                memory, mem_coords = self._global_select(curr, history_keys, history_vals, history_pos, t)
+                # Global sparse selection from history
+                memory, mem_coords = self._global_select(
+                    curr, history_feats, history_feats, history_pos, t
+                )
                 
-                # Attention
+                # Cross-attention with selected memory
                 out = self.attn(
-                    curr,
-                    memory,
+                    curr, memory,
                     curr_pos=curr_coords,
                     memory_pos=mem_coords
                 )
                 out_seq.append(out)
                 
-                # Prepare current frame for next history (add temporal PE)
-                m_frame = mem_encoded[:, t].flatten(2).permute(0, 2, 1) # (B, L, D)
-                history_keys.append(m_frame) # Use full features as keys for now
-                history_vals.append(m_frame)
+                # Add current frame to history for next iteration
+                m_frame = mem_encoded[:, t].flatten(2).permute(0, 2, 1)  # (B, L, D)
+                history_feats.append(m_frame)
                 history_pos.append(curr_coords)
 
             out = torch.stack(out_seq, dim=1).flatten(0, 1)
         else:
-            # Inference
-            # 1. Global Selection from Bank
+            # Inference mode
             memory, mem_coords = self._global_select_inference(x_flat)
             
-            # 2. Attention
             out = self.attn(
-                x_flat,
-                memory,
+                x_flat, memory,
                 curr_pos=grid_flat,
                 memory_pos=mem_coords
             )
             
-            # 3. Update Bank
+            # Update bank for next frame
             m_enc = self.memory_encoder(x).flatten(2).permute(0, 2, 1)
             self._update_bank(m_enc, m_enc, grid_flat)
             
@@ -1020,38 +1105,53 @@ class VSAMemoryAttention(YOLOMemoryAttention):
         return self.proj_out(out)
 
     def _global_select(self, query, hist_keys, hist_vals, hist_pos, current_t):
-        if not hist_keys:
-            return query, torch.zeros(query.shape[0], query.shape[1], 2, device=query.device) # Fallback
+        """
+        Global sparse selection from history features.
+        
+        Args:
+            query: Current frame query (B, L, D)
+            hist_keys: List of history key features
+            hist_vals: List of history value features  
+            hist_pos: List of history positions
+            current_t: Current time step
             
-        # Cat all history
-        # Apply T-Pos to keys? Yes, to distinguish temporal order.
+        Returns:
+            Selected features and their coordinates
+        """
+        if not hist_keys:
+            # No history, return query as self-attention fallback
+            return query, torch.zeros(query.shape[0], query.shape[1], 2, device=query.device)
+        
         keys_pool = []
         vals_pool = []
         pos_pool = []
         
         num_hist = len(hist_keys)
         for i in range(num_hist):
-             lag = num_hist - i
-             idx = max(0, self.max_memory - lag)
-             t_enc = self.maskmem_tpos_enc[idx].squeeze(1)
-             
-             keys_pool.append(hist_keys[i] + t_enc)
-             vals_pool.append(hist_vals[i] + t_enc)
-             pos_pool.append(hist_pos[i])
-             
-        K_global = torch.cat(keys_pool, dim=1) # (B, L_total, D)
+            lag = num_hist - i
+            idx = max(0, self.max_memory - lag)
+            t_enc = self.maskmem_tpos_enc[idx].squeeze(1)
+            
+            # Ensure device consistency
+            device = hist_keys[i].device
+            t_enc = t_enc.to(device)
+            
+            # Only add temporal encoding to KEYS (not values)
+            # This helps distinguish temporal order while keeping values clean
+            keys_pool.append(hist_keys[i] + t_enc)
+            vals_pool.append(hist_vals[i])  # Values without temporal encoding
+            pos_pool.append(hist_pos[i])
+        
+        K_global = torch.cat(keys_pool, dim=1)  # (B, L_total, D)
         V_global = torch.cat(vals_pool, dim=1)
         P_global = torch.cat(pos_pool, dim=1)
         
-        # Global Top-K
-        # Score: (B, L_total)
-        # Using simple Score Head on Keys
-        scores = self.score_head(K_global).squeeze(-1)
-        
+        # Score-based top-k selection
+        scores = self.score_head(K_global).squeeze(-1)  # (B, L_total)
         k = min(self.global_topk, K_global.shape[1])
-        _, topk_indices = torch.topk(scores, k, dim=1) # (B, k)
+        _, topk_indices = torch.topk(scores, k, dim=1)  # (B, k)
         
-        # Gather
+        # Gather selected features
         topk_indices_expanded = topk_indices.unsqueeze(-1).expand(-1, -1, self.d_model)
         features_sparse = torch.gather(V_global, 1, topk_indices_expanded)
         
@@ -1065,9 +1165,20 @@ class VSAMemoryAttention(YOLOMemoryAttention):
             self.key_bank.pop(0)
             self.val_bank.pop(0)
             self.pos_bank.pop(0)
-        self.key_bank.append(key)
-        self.val_bank.append(val)
-        self.pos_bank.append(pos)
+        # Clone and detach to ensure tensors can be used in training mode
+        # This prevents "Inference tensors cannot be saved for backward" error
+        self.key_bank.append(key.clone().detach())
+        self.val_bank.append(val.clone().detach())
+        self.pos_bank.append(pos.clone().detach())
 
     def _global_select_inference(self, query):
+        # Safety check: verify device consistency and reset if mismatch
+        if self.key_bank:
+            bank_device = self.key_bank[0].device
+            query_device = query.device
+            if bank_device != query_device:
+                # Device mismatch (e.g., training on cuda:0, validation with different model state)
+                # Reset bank to avoid errors
+                self.reset_memory()
+        
         return self._global_select(query, self.key_bank, self.val_bank, self.pos_bank, len(self.key_bank))
