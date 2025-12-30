@@ -1,0 +1,9 @@
+# MOMT Dataset - Camera View 1
+path: /home/hetao/graduate/data/MDMT-yolo/camera1/
+train: images/train
+val: images/val
+test: images/test
+
+# Classes
+nc: 4
+names: ['car', 'person', 'bicycle', 'bus']
