@@ -184,10 +184,7 @@ __all__ = (
     "TrajectoryBlock",
     "MotionAligner",
     "YOLOMemoryAttention",
-<<<<<<< HEAD
+    "SparseMemoryAttention",
     "MultiviewFusionBlock",
     "GeoPositionalEmbedding",
-=======
-    "SparseMemoryAttention",
->>>>>>> main
 )
