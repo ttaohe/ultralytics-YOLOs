@@ -71,6 +71,7 @@ from ultralytics.nn.modules import (
     YOLOESegment,
     v10Detect,
 )
+
 from ultralytics.utils import DEFAULT_CFG_DICT, LOGGER, YAML, colorstr, emojis
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
@@ -1533,10 +1534,11 @@ def load_checkpoint(weight, device=None, inplace=True, fuse=False):
 
 
 def parse_model(d, ch, verbose=True):
-    from ultralytics.nn.modules.video_block import YOLOMemoryAttention
+    from ultralytics.nn.modules.video_attention import YOLOMemoryAttention, SparseMemoryAttention
     from ultralytics.nn.modules.multiview_block import MultiviewFusionBlock
     # Inject into globals so parse_model can find them via globals()[m]
     globals()['YOLOMemoryAttention'] = YOLOMemoryAttention
+    globals()['SparseMemoryAttention'] = SparseMemoryAttention
     globals()['MultiviewFusionBlock'] = MultiviewFusionBlock
     """
     Parse a YOLO model.yaml dictionary into a PyTorch model.

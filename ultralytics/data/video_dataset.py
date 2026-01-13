@@ -8,6 +8,8 @@ from ultralytics.data.augment import LetterBox
 from ultralytics.data.dataset import YOLODataset
 from ultralytics.utils import LOGGER
 
+from .augment_video import TargetMask
+
 class VisDroneVideoDataset(YOLODataset):
     """
     Dataset class for VisDrone-VID (Video Object Detection) with History Support.
@@ -21,14 +23,18 @@ class VisDroneVideoDataset(YOLODataset):
         use_homography: bool = False,
         random_crop_size: int = 0,
         random_crop_prob: float = 1.0,
+        mask_ratio: float = 0.0, 
+        vid_stride: int = 1,
         **kwargs,
     ):
+        self.vid_stride = max(1, int(vid_stride or 1))
         self._hyp = kwargs.get("hyp")
         self.baseline_mode = kwargs.get("baseline_mode", False) or getattr(self._hyp, "baseline_mode", False)
         self.use_homography = use_homography and not self.baseline_mode
         # Random window crop for high-res VisDrone frames (applied before transforms)
         self.random_crop_size = int(random_crop_size or 0)
         self.random_crop_prob = float(random_crop_prob or 0.0)
+        self.mask_ratio = float(mask_ratio or 0.0)
         
         # Save original flip probabilities and disable them for super()
         # We will manually handle flip in __getitem__ to ensure synchronization
@@ -49,11 +55,12 @@ class VisDroneVideoDataset(YOLODataset):
         # We need to set self.augment manually because super().__init__ hasn't run yet
         self.augment = kwargs.get("augment", True)
         self.prefix = kwargs.get("prefix", "")
-        self.prefix = kwargs.get("prefix", "")
-        # self._check_video_augmentations() # Removed: We now support augmentations via Channel Stacking
         
         if self.augment:
             LOGGER.info(f"{self.prefix}Random Crop Config: size={self.random_crop_size}, prob={self.random_crop_prob}")
+            if self.mask_ratio > 0:
+                 self.target_mask_aug = TargetMask(p=0.5, mask_ratio=self.mask_ratio)
+                 LOGGER.info(f"{self.prefix}TargetMask Enabled: ratio={self.mask_ratio}, p=0.5")
 
         super().__init__(*args, **kwargs)
         
@@ -74,6 +81,10 @@ class VisDroneVideoDataset(YOLODataset):
         else:
             self.orb = None
 
+        # Filter indices based on vid_stride
+        if self.vid_stride > 1 and self.augment:
+             self._filter_dataset_by_stride()
+             
     # ---------------------------- Random window crop helpers ---------------------------- #
 
     def get_image_and_label(self, index: int) -> dict:
@@ -132,6 +143,62 @@ class VisDroneVideoDataset(YOLODataset):
         
         return label
 
+
+    
+    def _filter_dataset_by_stride(self):
+        """
+        Filter dataset to only keep every Nth frame (vid_stride) for each video.
+        This modifies self.im_files, self.labels, self.video_indices, etc. in place.
+        """
+        keep_indices = []
+        
+        # We need to process each video separately
+        # self.video_indices is already populated by _get_video_indices in __init__
+        
+        # Find boundaries of each video
+        # Since self.video_indices is a numpy array of video IDs corresponding to self.im_files
+        unique_vids = np.unique(self.video_indices)
+        
+        for vid in unique_vids:
+            # Get all indices for this video
+            # Note: np.where returns a tuple
+            indices = np.where(self.video_indices == vid)[0]
+            indices = sorted(indices) # Ensure sorted order
+            
+            # Select every Nth frame
+            # Example: indices=[0, 1, 2, 3, 4, 5], stride=5 -> [0, 5]
+            selected = indices[::self.vid_stride]
+            keep_indices.extend(selected)
+            
+        keep_indices = sorted(keep_indices)
+        
+        # Apply filtering
+        n_before = len(self.im_files)
+        
+        # Filter im_files
+        self.im_files = [self.im_files[i] for i in keep_indices]
+        
+        # Filter labels
+        self.labels = [self.labels[i] for i in keep_indices]
+        
+        # Filter video_indices (re-compute or filter)
+        # It's safer to re-compute or filter array
+        self.video_indices = self.video_indices[keep_indices]
+        
+        # Handle other arrays if they exist (npy_files, ims, etc form BaseDataset)
+        if hasattr(self, 'npy_files') and self.npy_files:
+             self.npy_files = [self.npy_files[i] for i in keep_indices]
+        if hasattr(self, 'ims') and self.ims:
+             # self.ims is a list of [None]*ni mostly
+             self.ims = [self.ims[i] for i in keep_indices]
+             self.im_hw0 = [self.im_hw0[i] for i in keep_indices]
+             self.im_hw = [self.im_hw[i] for i in keep_indices]
+             
+        self.ni = len(self.im_files)
+        
+        LOGGER.info(f"{self.prefix}Sparse Video Sampling enabled: "
+                    f"vid_stride={self.vid_stride}. "
+                    f"Reduced dataset from {n_before} to {self.ni} images.")
 
     def _get_video_indices(self):
         """
@@ -195,6 +262,13 @@ class VisDroneVideoDataset(YOLODataset):
         # Random Stride Logic (SAM3-style)
         stride_min = 1
         stride_max = 10 if self.augment else 1
+        # Random Stride Logic (SAM3-style)
+        stride_min = 1
+        # Adjust stride max based on video stride to keep temporal gap reasonable
+        stride_max = 10 if self.augment else 1
+        if self.vid_stride > 1:
+            stride_max = max(1, 10 // self.vid_stride)
+            
         # Use np.random.randint for consistency
         stride = np.random.randint(stride_min, stride_max + 1)
 
@@ -318,6 +392,12 @@ class VisDroneVideoDataset(YOLODataset):
         # data['img'] here will be a 6-CH Tensor (augmented synchronously)
         data = super().__getitem__(index)
         
+        if self.augment:
+             # print(f"DEBUG: calling target_mask? has={hasattr(self, 'target_mask_aug')}")
+             if hasattr(self, 'target_mask_aug'):
+                 # print("DEBUG: Calling TargetMask!")
+                 data = self.target_mask_aug(data)
+
         # 2. Unstack 6-channel Tensor -> Current (3-ch) + History (3-ch)
         img_stack = data['img'] # Tensor [6, H, W]
         

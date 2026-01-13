@@ -50,7 +50,8 @@ class VideoValidator(DetectionValidator):
     def preprocess(self, batch):
         """
         Preprocess batch and handle memory reset.
-        Assumes batch_size=1 for safe memory management during validation.
+        Assumes per-rank batch_size=1 for safe memory management during validation.
+        (Enforced by SAM2VideoTrainer.get_dataloader(mode="val").)
         """
         # Check if we need to reset memory
         # We need access to video indices from the dataset.
@@ -160,6 +161,8 @@ class SAM2VideoTrainer(DetectionTrainer):
         random_crop_size = overrides.pop("random_crop_size", 0)
         random_crop_prob = overrides.pop("random_crop_prob", 1.0)
         val_imgsz = overrides.pop("val_imgsz", 0) # [EXPERIMENTAL] High-res validation support
+        mask_ratio = overrides.pop("mask_ratio", 0.0) # Target Masking for Cross-Attention
+        vid_stride = overrides.pop("vid_stride", 1) # Sparse Video Sampling
         
         # Call parent initializer with cleaned overrides
         super().__init__(cfg, overrides, _callbacks)
@@ -175,10 +178,13 @@ class SAM2VideoTrainer(DetectionTrainer):
         self.args.random_crop_size = int(random_crop_size)
         self.args.random_crop_prob = float(random_crop_prob or 0.0)
         self.args.val_imgsz = int(val_imgsz)
+        self.args.mask_ratio = float(mask_ratio or 0.0)
+        self.args.vid_stride = int(vid_stride)
 
         self.random_crop_size = self.args.random_crop_size
         self.random_crop_prob = self.args.random_crop_prob
         self.val_imgsz = self.args.val_imgsz # Store val_imgsz
+        self.mask_ratio = self.args.mask_ratio
     
     def get_model(self, cfg=None, weights=None, verbose=True):
         """Return a YOLOVideo model."""
@@ -199,6 +205,14 @@ class SAM2VideoTrainer(DetectionTrainer):
         original_imgsz = self.args.imgsz
         if mode == "val" and self.val_imgsz > 0:
             self.args.imgsz = self.val_imgsz
+
+        # IMPORTANT (Video validation correctness):
+        # We must keep per-rank batch_size=1 so that the model memory state is not mixed
+        # across different video sequences within the same batch.
+        # Note: Our build_dataloader() does NOT divide batch by world_size when using DDP,
+        # so setting batch_size=1 here results in a global batch = world_size (still a multiple).
+        if mode == "val":
+            batch_size = 1
             
         try:
             return super().get_dataloader(dataset_path, batch_size, rank, mode)
@@ -209,9 +223,9 @@ class SAM2VideoTrainer(DetectionTrainer):
     def get_validator(self):
         """Returns a customized VideoValidator."""
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
-        # Force batch size to 1 for validation to ensure correct video memory handling
+        # Force per-rank batch size to 1 for validation to ensure correct video memory handling
         args = copy(self.args)
-        args.batch = 2  # For DDP with 2 GPUs, batch size must be multiple of 2
+        args.batch = 1  # For VideoValidator logic; actual loader batch is enforced in get_dataloader(mode="val")
         
         # [EXPERIMENTAL] High-res validation support
         if self.val_imgsz > 0:
@@ -226,6 +240,10 @@ class SAM2VideoTrainer(DetectionTrainer):
             delattr(args, 'random_crop_prob')
         if hasattr(args, 'val_imgsz'):
             delattr(args, 'val_imgsz')
+        if hasattr(args, 'mask_ratio'):
+            delattr(args, 'mask_ratio')
+        if hasattr(args, 'vid_stride'):
+             delattr(args, 'vid_stride')
         return VideoValidator(
             self.test_loader, save_dir=self.save_dir, args=args, _callbacks=self.callbacks
         )
@@ -259,6 +277,8 @@ class SAM2VideoTrainer(DetectionTrainer):
             # Random crop 控制，只在 train 模式启用
             random_crop_size=self.random_crop_size if mode == "train" else 0,
             random_crop_prob=self.random_crop_prob if mode == "train" else 0.0,
+            mask_ratio=self.mask_ratio if mode == "train" else 0.0,
+            vid_stride=self.args.vid_stride if mode == "train" else 1,
         )
 
     def preprocess_batch(self, batch):

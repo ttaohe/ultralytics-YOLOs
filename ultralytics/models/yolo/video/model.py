@@ -1,5 +1,5 @@
 # Ultralytics Video Model
-from ultralytics.nn.modules import YOLOMemoryAttention
+from ultralytics.nn.modules import YOLOMemoryAttention, SparseMemoryAttention
 from ultralytics.nn.tasks import DetectionModel
 import torch
 
@@ -42,4 +42,24 @@ class YOLOVideo(DetectionModel):
         for m in self.model.modules():
             if isinstance(m, YOLOMemoryAttention):
                 m.reset_memory()
+
+    def set_memory(self, memory):
+        """
+        [State Injection]
+        Inject external memory state into the attention layer.
+        """
+        for m in self.model.modules():
+            if isinstance(m, YOLOMemoryAttention):
+                m.set_memory(memory)
+                break # Assuming model has one memory attention layer for now
+
+    def get_memory(self):
+        """
+        [State Extraction]
+        Retrieve external memory state from the attention layer.
+        """
+        for m in self.model.modules():
+            if isinstance(m, YOLOMemoryAttention):
+                return m.get_memory()
+        return None
 

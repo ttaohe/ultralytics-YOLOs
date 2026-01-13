@@ -102,7 +102,7 @@ from .transformer import (
     TransformerLayer,
 )
 from .trajectory import TrajectoryBlock, MotionAligner
-from .video_block import YOLOMemoryAttention
+from .video_attention import YOLOMemoryAttention, SparseMemoryAttention
 from .multiview_block import MultiviewFusionBlock, GeoPositionalEmbedding
 
 __all__ = (
@@ -181,10 +181,13 @@ __all__ = (
     "PSA",
     "TorchVision",
     "Index",
-    "A2C2f",
     "TrajectoryBlock",
     "MotionAligner",
     "YOLOMemoryAttention",
+<<<<<<< HEAD
     "MultiviewFusionBlock",
     "GeoPositionalEmbedding",
+=======
+    "SparseMemoryAttention",
+>>>>>>> main
 )
