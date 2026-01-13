@@ -397,8 +397,10 @@ class BaseTrainer:
                 LOGGER.info(self.progress_string())
                 pbar = TQDM(enumerate(self.train_loader), total=nb)
             self.tloss = None
+            data_t0 = time.perf_counter()
             for i, batch in pbar:
                 self.run_callbacks("on_train_batch_start")
+                data_time = time.perf_counter() - data_t0
                 # Warmup
                 ni = i + nb * epoch
                 if ni <= nw:
@@ -413,6 +415,7 @@ class BaseTrainer:
                             x["momentum"] = np.interp(ni, xi, [self.args.warmup_momentum, self.args.momentum])
 
                 # Forward
+                compute_t0 = time.perf_counter()
                 with autocast(self.amp):
                     batch = self.preprocess_batch(batch)
                     if self.args.compile:
@@ -448,6 +451,11 @@ class BaseTrainer:
 
                 # Log
                 if RANK in {-1, 0}:
+                    compute_time = time.perf_counter() - compute_t0
+                    if self.args.time_log_interval and (i + 1) % self.args.time_log_interval == 0:
+                        LOGGER.info(
+                            f"iter {i + 1}/{nb}: data_time={data_time:.3f}s compute_time={compute_time:.3f}s"
+                        )
                     loss_length = self.tloss.shape[0] if len(self.tloss.shape) else 1
                     pbar.set_description(
                         ("%11s" * 2 + "%11.4g" * (2 + loss_length))
@@ -464,6 +472,9 @@ class BaseTrainer:
                         self.plot_training_samples(batch, ni)
 
                 self.run_callbacks("on_train_batch_end")
+                data_t0 = time.perf_counter()
+                if self.stop:
+                    break
 
             self.lr = {f"lr/pg{ir}": x["lr"] for ir, x in enumerate(self.optimizer.param_groups)}  # for loggers
             self.run_callbacks("on_train_epoch_end")

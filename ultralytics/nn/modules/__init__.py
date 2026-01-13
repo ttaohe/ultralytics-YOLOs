@@ -103,6 +103,7 @@ from .transformer import (
 )
 from .trajectory import TrajectoryBlock, MotionAligner
 from .video_block import YOLOMemoryAttention
+from .multiview_block import MultiviewFusionBlock, GeoPositionalEmbedding
 
 __all__ = (
     "Conv",
@@ -184,4 +185,6 @@ __all__ = (
     "TrajectoryBlock",
     "MotionAligner",
     "YOLOMemoryAttention",
+    "MultiviewFusionBlock",
+    "GeoPositionalEmbedding",
 )

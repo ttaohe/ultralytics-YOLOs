@@ -1,0 +1,35 @@
+# MDMT Multiview Dataset
+# Two-camera view dataset for multiview object detection
+#
+# Data structure:
+#   - Images are stored separately in camera1/ and camera2/ directories
+#   - Each scene has corresponding views: 23-1_XXXXXX.jpg (camera1) and 23-2_XXXXXX.jpg (camera2)
+#   - Position encodings (PE) are in pes/ folder: camera1/pes/ and camera2/pes/
+#   - Labels are in labels/ folder: camera1/labels/ and camera2/labels/
+
+# Root path for multiview data
+# Images will be loaded from camera1 and camera2 subdirectories
+path: /home/hetao/graduate/data/MDMT-yolo
+
+# For MultiviewDataset, we need to interleave images from both cameras
+# Format: [camera1_img1, camera2_img1, camera1_img2, camera2_img2, ...]
+# Since images are in separate directories, MultiviewDataset will handle the merging
+# Use absolute paths for train/val/test
+train: /home/hetao/graduate/data/MDMT-yolo/camera1/images/train
+val: /home/hetao/graduate/data/MDMT-yolo/camera1/images/val
+test: /home/hetao/graduate/data/MDMT-yolo/camera1/images/test
+
+# Classes
+nc: 4
+names: ['car', 'person', 'bicycle', 'bus']
+
+# Multiview specific settings
+num_views: 2  # Two camera views
+
+# Camera directories for separate mode
+camera_dirs:
+  - camera1
+  - camera2
+
+# Use memory-mapped PE loading to reduce memory copies
+pe_mmap: true

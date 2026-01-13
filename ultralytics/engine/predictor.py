@@ -181,7 +181,18 @@ class BasePredictor:
             if self.args.visualize and (not self.source_type.tensor)
             else False
         )
-        return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed, *args, **kwargs)
+        coords = kwargs.pop("coords", None)
+        if coords is None and isinstance(self.batch, dict):
+            coords = self.batch.get("coords")
+        return self.model(
+            im,
+            augment=self.args.augment,
+            visualize=visualize,
+            embed=self.args.embed,
+            coords=coords,
+            *args,
+            **kwargs,
+        )
 
     def pre_transform(self, im: list[np.ndarray]) -> list[np.ndarray]:
         """
