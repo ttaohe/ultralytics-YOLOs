@@ -156,6 +156,14 @@ class BaseModel(torch.nn.Module):
         Returns:
             (torch.Tensor): The last output of the model.
         """
+        # Align input dtype with model weights to avoid FP16/FP32 mismatch in val/inference.
+        if isinstance(x, torch.Tensor):
+            try:
+                dtype = next(self.parameters()).dtype
+                if x.dtype != dtype:
+                    x = x.to(dtype)
+            except Exception:
+                pass
         if augment:
             return self._predict_augment(x)
         return self._predict_once(x, profile, visualize, embed, coords=coords)
@@ -175,12 +183,29 @@ class BaseModel(torch.nn.Module):
             (torch.Tensor): The last output of the model.
         """
         from ultralytics.nn.modules.multiview_block import MultiviewFusionBlock
+        try:
+            model_dtype = next(self.parameters()).dtype
+        except Exception:
+            model_dtype = None
+
+        def _cast_to_model_dtype(t):
+            if model_dtype is None:
+                return t
+            if isinstance(t, torch.Tensor) and t.dtype != model_dtype:
+                return t.to(model_dtype)
+            if isinstance(t, (list, tuple)):
+                return [i.to(model_dtype) if isinstance(i, torch.Tensor) and i.dtype != model_dtype else i for i in t]
+            return t
+
+        x = _cast_to_model_dtype(x)
+        coords = _cast_to_model_dtype(coords)
         y, dt, embeddings = [], [], []  # outputs
         embed = frozenset(embed) if embed is not None else {-1}
         max_idx = max(embed)
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
+            x = _cast_to_model_dtype(x)
             if profile:
                 self._profile_one_layer(m, x, dt)
             

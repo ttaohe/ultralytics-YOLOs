@@ -151,6 +151,11 @@ class BaseValidator:
             if trainer.args.compile and hasattr(model, "_orig_mod"):
                 model = model._orig_mod  # validate non-compiled original model to avoid issues
             model = model.half() if self.args.half else model.float()
+            # Ensure args.half matches the actual model dtype (avoids FP16/FP32 mismatch)
+            try:
+                self.args.half = next(model.parameters()).dtype == torch.float16
+            except Exception:
+                pass
             self.model = model # Attach model to validator for access in preprocess
             self.loss = torch.zeros_like(trainer.loss_items, device=trainer.device)
             self.args.plots &= trainer.stopper.possible_stop or (trainer.epoch == trainer.epochs - 1)
@@ -210,6 +215,17 @@ class BaseValidator:
             # Preprocess
             with dt[0]:
                 batch = self.preprocess(batch)
+                # Ensure batch dtype matches model dtype to avoid conv type mismatch
+                if isinstance(model, torch.nn.Module):
+                    try:
+                        model_dtype = next(model.parameters()).dtype
+                    except Exception:
+                        model_dtype = None
+                    if model_dtype is not None:
+                        if isinstance(batch.get("img"), torch.Tensor) and batch["img"].dtype != model_dtype:
+                            batch["img"] = batch["img"].to(model_dtype)
+                        if isinstance(batch.get("coords"), torch.Tensor) and batch["coords"].dtype != model_dtype:
+                            batch["coords"] = batch["coords"].to(model_dtype)
 
             # Inference
             with dt[1]:

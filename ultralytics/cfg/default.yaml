@@ -28,6 +28,7 @@ pretrained: True # (bool | str) use pretrained weights (bool) or load weights fr
 optimizer: auto # (str) optimizer: SGD, Adam, Adamax, AdamW, NAdam, RAdam, RMSProp, or auto
 verbose: True # (bool) print verbose logs during training/val
 verbose_test_only: False # (bool) only print per-class results during standalone test/val
+debug_dtype: False # (bool) print dtype alignment info once during validation
 seed: 0 # (int) random seed for reproducibility
 deterministic: True # (bool) enable deterministic ops; reproducible but may be slower
 single_cls: False # (bool) treat all classes as a single class

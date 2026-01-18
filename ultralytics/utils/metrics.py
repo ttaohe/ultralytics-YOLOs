@@ -527,7 +527,11 @@ class ConfusionMatrix(DataExportMixin):
         array[array < 0.005] = np.nan  # don't annotate (would appear as 0.00)
 
         fig, ax = plt.subplots(1, 1, figsize=(12, 9))
-        names, n = list(self.names.values()), self.nc
+        if isinstance(self.names, (list, tuple)):
+            names = list(self.names)
+        else:
+            names = list(self.names.values())
+        n = self.nc
         if self.nc >= 100:  # downsample for large class count
             k = max(2, self.nc // 60)  # step size for downsampling, always > 1
             keep_idx = slice(None, None, k)  # create slice instead of array

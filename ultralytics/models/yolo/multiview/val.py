@@ -34,6 +34,25 @@ class MultiviewValidator(DetectionValidator):
             metrics.names = model.names
             metrics.nc = len(model.names)
 
+    def preprocess(self, batch: dict):
+        """Preprocess batch and align dtype with model (handles AMP/FP16)."""
+        batch = super().preprocess(batch)
+        try:
+            dtype = next(self.model.parameters()).dtype
+        except Exception:
+            return batch
+        batch["img"] = batch["img"].to(dtype)
+        if "coords" in batch:
+            batch["coords"] = batch["coords"].to(dtype)
+        if getattr(self.args, "debug_dtype", False) and not getattr(self, "_dtype_logged", False):
+            self._dtype_logged = True
+            img_dtype = batch["img"].dtype
+            coords_dtype = getattr(batch.get("coords"), "dtype", None)
+            LOGGER.info(
+                f"[debug_dtype] model={dtype} img={img_dtype} coords={coords_dtype} half_arg={self.args.half}"
+            )
+        return batch
+
     def update_metrics(self, preds, batch):
         """
         Update metrics with new predictions and ground truth.
@@ -118,6 +137,7 @@ class MultiviewValidator(DetectionValidator):
         view_stats = {}
         for i, view_metric in enumerate(self.view_metrics):
             view_dir = self.save_dir / f"view_{i+1}"
+            view_dir.mkdir(parents=True, exist_ok=True)
             view_metric.process(save_dir=view_dir, plot=self.args.plots, on_plot=self.on_plot)
             view_metric.clear_stats()
 

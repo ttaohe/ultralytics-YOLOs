@@ -1,0 +1,47 @@
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# YOLOv10l-Multiview object detection model with Late Fusion at P5
+# Applies MultiviewFusionBlock at P5 level for cross-view feature fusion late in the network
+# P3 and P4 continue with standard processing without fusion
+
+# Parameters
+nc: 80 # number of classes
+scales:
+  # [depth, width, max_channels]
+  l: [1.00, 1.00, 512]
+
+backbone:
+  # [from, repeats, module, args]
+  - [-1, 1, Conv, [64, 3, 2]] # 0-P1/2
+  - [-1, 1, Conv, [128, 3, 2]] # 1-P2/4
+  - [-1, 3, C2f, [128, True]]
+  - [-1, 1, Conv, [256, 3, 2]] # 3-P3/8
+  - [-1, 6, C2f, [256, True]] # 4 (P3 backbone output)
+  - [-1, 1, SCDown, [512, 3, 2]] # 5-P4/16
+  - [-1, 6, C2f, [512, True]] # 6 (P4)
+  - [-1, 1, SCDown, [1024, 3, 2]] # 7-P5/32
+  - [-1, 3, C2fCIB, [1024, True]] # 8 (P5)
+  - [-1, 1, SPPF, [1024, 5]] # 9
+  - [-1, 1, PSA, [1024]] # 10
+
+head:
+  # Standard FPN top-down pathway
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 11
+  - [[-1, 6], 1, Concat, [1]] # 12 cat backbone P4
+  - [-1, 3, C2fCIB, [512, True]] # 13
+
+  - [-1, 1, nn.Upsample, [None, 2, "nearest"]] # 14
+  - [[-1, 4], 1, Concat, [1]] # 15 cat backbone P3
+  - [-1, 3, C2f, [256]] # 16 (P3/8-small)
+
+  # FPN bottom-up pathway with Late Fusion at P5
+  - [-1, 1, Conv, [256, 3, 2]] # 17
+  - [[-1, 13], 1, Concat, [1]] # 18 cat head P4
+  - [-1, 3, C2fCIB, [512, True]] # 19 (P4/16-medium)
+
+  - [-1, 1, SCDown, [512, 3, 2]] # 20
+  - [[-1, 10], 1, Concat, [1]] # 21 cat head P5
+  - [-1, 3, C2fCIB, [1024, True]] # 22 (P5/32-large)
+  - [-1, 1, MultiviewFusionBlock, [1024]] # 23 (Fused P5)
+
+  - [[16, 19, 23], 1, v10Detect, [nc]] # 24 Detect(P3, P4, P5)

@@ -58,6 +58,9 @@ class MultiviewFusionBlock(nn.Module):
         self.window_size = window_size
         self.const_pe_eps = 1e-6
         self.attn_mask_max_len = 4096
+        self.overlap_low = 0.18
+        self.overlap_high = 0.45
+        self.overlap_weight_enabled = True
         self.export_attn = False
         self.export_attn_max_len = 2048
         self.last_attn_maps = None
@@ -143,6 +146,8 @@ class MultiviewFusionBlock(nn.Module):
 
         # Build key mask from constant PE regions (supports 2-view encoding)
         attn_key_mask = None
+        overlap_mask = None
+        overlap_weight = None
         if V == 2:
             const0 = torch.tensor([1.0, 0.0, 1.0, 0.0], device=coords_feat.device, dtype=coords_feat.dtype)
             const1 = torch.tensor([-1.0, 0.0, -1.0, 0.0], device=coords_feat.device, dtype=coords_feat.dtype)
@@ -152,6 +157,11 @@ class MultiviewFusionBlock(nn.Module):
             if self.downsample_factor > 1:
                 df = self.downsample_factor
                 valid_mask = F.max_pool2d(valid_mask.float(), kernel_size=df, stride=df) > 0
+            overlap_mask = valid_mask.all(dim=1, keepdim=True)  # (B, 1, H, W)
+            if self.overlap_weight_enabled:
+                overlap_ratio = valid_mask.float().mean(dim=(1, 2, 3))  # (B,)
+                denom = max(self.overlap_high - self.overlap_low, 1e-6)
+                overlap_weight = ((overlap_ratio - self.overlap_low) / denom).clamp(0.0, 1.0)
             if H_new * W_new * V <= self.attn_mask_max_len:
                 attn_key_mask = (~valid_mask).reshape(B, V * H_new * W_new)  # True = mask key
 
@@ -195,13 +205,20 @@ class MultiviewFusionBlock(nn.Module):
 
         # Upsample back to original resolution
         if self.downsample_factor > 1:
-            attn_out = self.upsample(attn_out)  # (B*V, D, H, W)
+            attn_out = self.upsample(attn_out)  # (B*V, D, H, W) nominal
+            if attn_out.shape[-2:] != (H, W):
+                attn_out = F.interpolate(attn_out, size=(H, W), mode="bilinear", align_corners=False)
 
         # Output projection
         out = self.out_proj(attn_out)
 
         # Residual connection
         if self.c1 == self.c2:
+            if overlap_mask is not None:
+                overlap_mask = overlap_mask.repeat_interleave(V, dim=0)
+                out = out * overlap_mask + x * (1.0 - overlap_mask)
+            if overlap_weight is not None:
+                out = out * overlap_weight.view(B, 1, 1, 1).repeat_interleave(V, dim=0)
             return x + out
         return out
 

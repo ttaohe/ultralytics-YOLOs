@@ -26,14 +26,17 @@ def train():
     parser.add_argument("--project", type=str, default="runs/train_multiview")
     parser.add_argument("--name", type=str, default="yolo10l-multiview-disaug-earlyfusion")
     parser.add_argument("--num_views", type=int, default=2)
-    parser.add_argument("--cache", type=str, default='disk')
+    parser.add_argument("--cache", type=str, default='False')
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--save_period", type=int, default=-1)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--fraction", type=float, default=1.0, help="Fraction of dataset to use for fast runs")
     parser.add_argument("--verbose-test-only", default=True, help="Only print per-class results during test/val.")
     parser.add_argument("--pe-lmdb", type=str, default=None, help="Use LMDB PE storage: fp16, fp32, or custom path")
+    parser.add_argument("--pe-disable", action="store_true", help="Disable PE loading (ablation)")
     parser.add_argument("--time-log-interval", type=int, default=0, help="Print data/compute time every N iterations")
+    parser.add_argument("--debug-dtype", action="store_true", help="Log dtype alignment during val (first batch only)")
     parser.add_argument(
         "--profile-steps",
         type=int,
@@ -61,6 +64,8 @@ def train():
     data_dict = YAML.load(opt.data)
     if opt.pe_lmdb:
         data_dict["pe_lmdb"] = opt.pe_lmdb
+    if opt.pe_disable:
+        data_dict["pe_disable"] = True
     LOGGER.info(f"{colorstr('bright_blue')}Classes: {data_dict.get('names')}")
     LOGGER.info(f"{colorstr('bright_green')}Starting training...")
     LOGGER.info(f"  Model: {opt.model}")
@@ -91,8 +96,10 @@ def train():
             "save_period": opt.save_period,
             "seed": opt.seed,
             "deterministic": opt.deterministic,
+            "fraction": opt.fraction,
             "verbose_test_only": opt.verbose_test_only,
             "time_log_interval": opt.time_log_interval,
+            "debug_dtype": opt.debug_dtype,
         }
     )
 

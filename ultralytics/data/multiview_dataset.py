@@ -20,7 +20,8 @@ class MultiviewDataset(YOLODataset):
     - LRU cache for recently used PEs (size-limited, default 1000 entries ~ 5-10MB)
     - On-demand loading with efficient disk I/O
     """
-    def __init__(self, *args, num_views=1, camera_dirs=None, pe_cache_size=1000, pe_mmap=False, pe_lmdb=None, **kwargs):
+    def __init__(self, *args, num_views=1, camera_dirs=None, pe_cache_size=1000, pe_mmap=False, pe_lmdb=None,
+                 pe_disable=False, **kwargs):
         self.num_views = num_views
         self._missing_pe_warned = False  # Flag to warn only once
         self.camera_dirs = camera_dirs  # List of camera subdirectories (e.g., ['camera1', 'camera2'])
@@ -29,6 +30,7 @@ class MultiviewDataset(YOLODataset):
         self._pe_mmap = pe_mmap
         self._pe_lmdb = pe_lmdb
         self._pe_lmdb_envs = {}
+        self._pe_disable = pe_disable
 
         # For separate mode, we need to handle im_files differently
         if self._separate_mode:
@@ -93,51 +95,25 @@ class MultiviewDataset(YOLODataset):
         """
         im_path = Path(im_file)
 
-        # Try multiple possible locations for PE files
-        pe_paths = []
-
-        # 0. Try LMDB (if configured)
+        # Enforce pes_npz-only loading
         pe = self._load_pe_from_lmdb(im_path)
         if pe is not None:
             return pe
 
-        # 1. Try pes_npz/ folder (preferred)
         pe_filename = im_path.stem + "_pe.npy"
         pes_npz_dir = im_path.parents[2] / 'pes_npz' / im_path.parent.name
-        pe_paths.append(pes_npz_dir / pe_filename.replace("_pe.npy", "_pe.npz"))
-
-        # 2. Try pes_fp16/ folder
-        pes_fp16_dir = im_path.parents[2] / 'pes_fp16' / im_path.parent.name
-        pe_paths.append(pes_fp16_dir / pe_filename)
-
-        # 3. Try pes/ folder (legacy fp32)
-        pes_dir = im_path.parents[2] / 'pes' / im_path.parent.name
-        pe_paths.append(pes_dir / pe_filename)
-
-        # 4. Try coords/ folder (legacy support)
-        coords_dir = im_path.parents[2] / 'coords' / im_path.parent.name
-        pe_paths.append(coords_dir / (im_path.stem + '.npy'))
-
-        # Try to load from any of the paths
-        for pe_path in pe_paths:
-            if pe_path.exists():
-                try:
-                    if pe_path.suffix == ".npz":
-                        pe = np.load(pe_path)["pe"]
-                    elif self._pe_mmap:
-                        pe = np.load(pe_path, mmap_mode="r")
-                    else:
-                        pe = np.load(pe_path)
-                    # Expecting (H, W, 4) for sin/cos encoding
-                    if pe.ndim == 3 and pe.shape[2] in [3, 4]:
-                        # Handle both 3-channel and 4-channel PEs
-                        if pe.shape[2] == 3:
-                            # Pad 3-channel to 4-channel
-                            pe = np.pad(pe, [(0, 0), (0, 0), (0, 1)], mode='constant')
-                        return torch.from_numpy(pe).float()
-                except Exception as e:
-                    warnings.warn(f"Error loading PE from {pe_path}: {e}")
-                    continue
+        pe_path = pes_npz_dir / pe_filename.replace("_pe.npy", "_pe.npz")
+        if not pe_path.exists():
+            raise FileNotFoundError(f"PE npz not found: {pe_path}")
+        try:
+            pe = np.load(pe_path)["pe"]
+            # Expecting (H, W, 4) for sin/cos encoding
+            if pe.ndim == 3 and pe.shape[2] in [3, 4]:
+                if pe.shape[2] == 3:
+                    pe = np.pad(pe, [(0, 0), (0, 0), (0, 1)], mode='constant')
+                return torch.from_numpy(pe).float()
+        except Exception as e:
+            raise RuntimeError(f"Error loading PE from {pe_path}: {e}") from e
 
         return None
 
@@ -192,6 +168,7 @@ class MultiviewDataset(YOLODataset):
         """
         from tqdm import tqdm
         import pickle
+        import random
         from ultralytics.data.utils import get_hash
 
         # Get base path from data config or infer from im_files
@@ -211,10 +188,31 @@ class MultiviewDataset(YOLODataset):
         mode = Path(self.im_files[0]).parent.name if self.im_files else "train"
         # e.g., train
 
-        # Define cache path for multiview file list
-        # Use camera_dirs and mode to create unique cache name
-        cache_key = f"{'_'.join(self._camera_dirs)}_{self.num_views}views"
+        # Fractional subset support (use separate cache to avoid overwriting full cache)
+        fraction = float(getattr(self, "fraction", 1.0) or 1.0)
+        fraction = min(max(fraction, 0.0), 1.0)
+
+        def _apply_fraction(im_files, label_files):
+            if fraction >= 1.0 or fraction <= 0.0:
+                return im_files, label_files
+            n_total = len(im_files)
+            n_keep = max(1, int(n_total * fraction))
+            rng = random.Random(0)
+            indices = list(range(n_total))
+            rng.shuffle(indices)
+            indices = indices[:n_keep]
+            im_files = [im_files[i] for i in indices]
+            label_files = [label_files[i] for i in indices]
+            return im_files, label_files
+
+        # Define cache paths for multiview file list
+        base_cache_key = f"{'_'.join(self._camera_dirs)}_{self.num_views}views"
+        cache_key = base_cache_key
+        if 0.0 < fraction < 1.0:
+            frac_tag = f"frac{fraction:.4f}".replace(".", "p")
+            cache_key = f"{cache_key}_{frac_tag}"
         cache_path = base_path / f".{mode}_{cache_key}_multiview_cache.pkl"
+        full_cache_path = base_path / f".{mode}_{base_cache_key}_multiview_cache.pkl"
 
         # Try to load from cache first
         if cache_path.exists():
@@ -235,6 +233,41 @@ class MultiviewDataset(YOLODataset):
                     LOGGER.info(f"{self.prefix}Multiview cache outdated, rebuilding...")
             except Exception as e:
                 LOGGER.warning(f"{self.prefix}Error loading multiview cache: {e}, rebuilding...")
+
+        # If fractional cache missing, try to reuse full cache then slice
+        if 0.0 < fraction < 1.0 and full_cache_path.exists():
+            try:
+                with open(full_cache_path, 'rb') as f:
+                    cached_data = pickle.load(f)
+                cached_hash = get_hash([str(base_path / cam_dir / "images" / mode) for cam_dir in self._camera_dirs])
+                if cached_data.get('hash') == cached_hash:
+                    im_files = cached_data['im_files']
+                    label_files = cached_data['label_files']
+                    im_files, label_files = _apply_fraction(im_files, label_files)
+                    self.im_files = im_files
+                    self.label_files = label_files
+                    LOGGER.info(
+                        f"{self.prefix}Loaded {len(self.im_files)} multiview images from full cache and "
+                        f"applied fraction={fraction}"
+                    )
+                    # Save fractional cache for reuse
+                    try:
+                        cached_data = {
+                            'hash': cached_hash,
+                            'im_files': self.im_files,
+                            'label_files': self.label_files,
+                            'num_views': self.num_views,
+                            'camera_dirs': self._camera_dirs,
+                        }
+                        with open(cache_path, 'wb') as f:
+                            pickle.dump(cached_data, f)
+                        LOGGER.info(f"{self.prefix}Saved multiview cache to {cache_path.name}")
+                    except Exception as e:
+                        LOGGER.warning(f"{self.prefix}Failed to save multiview cache: {e}")
+                    self._rebuild_labels_after_file_load()
+                    return
+            except Exception as e:
+                LOGGER.warning(f"{self.prefix}Error loading full multiview cache: {e}, rebuilding...")
 
         # Cache miss or invalid, build from scratch
         LOGGER.info(f"{self.prefix}Building multiview dataset from scratch...")
@@ -284,7 +317,10 @@ class MultiviewDataset(YOLODataset):
                 self.im_files.extend(scene_images)
                 self.label_files.extend(scene_labels)
 
-        # Save to cache
+        # Apply fraction after building full list
+        self.im_files, self.label_files = _apply_fraction(self.im_files, self.label_files)
+
+        # Save to cache (fractional cache is separate from full cache)
         try:
             cache_hash = get_hash([str(base_path / cam_dir / "images" / mode) for cam_dir in self._camera_dirs])
             cached_data = {
@@ -559,14 +595,6 @@ class MultiviewDataset(YOLODataset):
             # Get label data (this calls get_image_and_label which loads the image)
             label = super().get_image_and_label(start_idx + v)
 
-            # Load PE at the RESIZED image size (not original size!)
-            # Because load_image already resized the image before transforms
-            im_file = self.im_files[start_idx + v]
-            res_h, res_w = label['resized_shape']  # (H, W) - the size AFTER load_image resize
-            pe = self.load_coords(im_file, (res_h, res_w))  # (H, W, 4)
-
-            # Concatenate PE with image: (H, W, 3+4) -> (H, W, 7)
-            # This ensures PE and image go through the SAME transforms
             img = label['img']  # (H, W, 3) numpy array - already resized by load_image
             if self.augment:
                 # Apply HSV only to RGB channels; keep PE unchanged.
@@ -576,19 +604,36 @@ class MultiviewDataset(YOLODataset):
                     img = RandomHSV(hgain=self.args.hsv_h, sgain=self.args.hsv_s, vgain=self.args.hsv_v)(
                         {"img": img}
                     )["img"]
-            img_with_pe = np.concatenate([img, pe.numpy()], axis=2)  # (H, W, 7)
 
-            # Replace img in label with concatenated version
-            label['img'] = img_with_pe
+            if self._pe_disable:
+                # Skip PE loading entirely (ablation)
+                label['img'] = img
+                label = self.transforms(label)
+                # Format converts to (C, H, W)
+                _, h_new, w_new = label['img'].shape
+                label['pe'] = torch.zeros((4, h_new, w_new), dtype=label['img'].dtype)
+            else:
+                # Load PE at the RESIZED image size (not original size!)
+                # Because load_image already resized the image before transforms
+                im_file = self.im_files[start_idx + v]
+                res_h, res_w = label['resized_shape']  # (H, W) - the size AFTER load_image resize
+                pe = self.load_coords(im_file, (res_h, res_w))  # (H, W, 4)
 
-            # Apply transforms (will apply to both image and PE channels)
-            label = self.transforms(label)
+                # Concatenate PE with image: (H, W, 3+4) -> (H, W, 7)
+                # This ensures PE and image go through the SAME transforms
+                img_with_pe = np.concatenate([img, pe.numpy()], axis=2)  # (H, W, 7)
 
-            # Split back into image and PE
-            transformed_img_with_pe = label['img']  # (C, H_new, W_new) where C=7 after transforms
-            # Format converts to (C, H, W), we need to split channels
-            label['img'] = transformed_img_with_pe[:3]  # First 3 channels: RGB
-            label['pe'] = transformed_img_with_pe[3:]  # Last 4 channels: PE
+                # Replace img in label with concatenated version
+                label['img'] = img_with_pe
+
+                # Apply transforms (will apply to both image and PE channels)
+                label = self.transforms(label)
+
+                # Split back into image and PE
+                transformed_img_with_pe = label['img']  # (C, H_new, W_new) where C=7 after transforms
+                # Format converts to (C, H, W), we need to split channels
+                label['img'] = transformed_img_with_pe[:3]  # First 3 channels: RGB
+                label['pe'] = transformed_img_with_pe[3:]  # Last 4 channels: PE
 
             views_data.append(label)
 

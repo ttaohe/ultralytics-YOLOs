@@ -21,8 +21,7 @@ test: /home/hetao/graduate/data/MDMT-yolo/camera1/images/test
 
 # Classes
 nc: 4
-names: ['car', 'person', 'bicycle', 'bus']
-
+names: ['person', 'bus', 'car', 'bicycle']
 # Multiview specific settings
 num_views: 2  # Two camera views
 

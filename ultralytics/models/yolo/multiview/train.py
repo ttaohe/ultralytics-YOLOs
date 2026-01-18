@@ -103,6 +103,7 @@ class MultiviewTrainer(DetectionTrainer):
         pe_cache_size = self.data.get('pe_cache_size', 1000)
         pe_mmap = self.data.get('pe_mmap', False)
         pe_lmdb = self.data.get('pe_lmdb', None)
+        pe_disable = self.data.get('pe_disable', False)
 
         LOGGER.info(colorstr(f"Building MultiviewDataset with num_views={num_views} for {mode}..."))
         if camera_dirs:
@@ -130,6 +131,7 @@ class MultiviewTrainer(DetectionTrainer):
             pe_cache_size=pe_cache_size,
             pe_mmap=pe_mmap,
             pe_lmdb=pe_lmdb,
+            pe_disable=pe_disable,
         )
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):

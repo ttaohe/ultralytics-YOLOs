@@ -16,6 +16,14 @@ class YOLOMultiview(DetectionModel):
         if isinstance(x, dict):
             return super().forward(x, *args, **kwargs)
 
+        # Ensure input dtype matches model weights (avoids FP16/FP32 mismatch in val)
+        try:
+            dtype = next(self.parameters()).dtype
+            if isinstance(x, torch.Tensor) and x.dtype != dtype:
+                x = x.to(dtype)
+        except Exception:
+            pass
+
         if x.dim() == 5:
             B, V, C, H, W = x.shape
             # Reshape to (B*V, C, H, W) for backbone
