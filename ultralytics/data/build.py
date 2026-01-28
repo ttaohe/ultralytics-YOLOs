@@ -212,7 +212,9 @@ def build_grounding(
     )
 
 
-def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, rank: int = -1, drop_last: bool = False):
+def build_dataloader(
+    dataset, batch: int, workers: int, shuffle: bool = True, rank: int = -1, drop_last: bool = False, sampler=None
+):
     """
     Create and return an InfiniteDataLoader or DataLoader for training or validation.
 
@@ -246,7 +248,12 @@ def build_dataloader(dataset, batch: int, workers: int, shuffle: bool = True, ra
     except Exception:
         # Debug 日志失败不影响训练
         pass
-    sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
+    if sampler is not None:
+        # Custom sampler takes precedence; disable distributed sampler and shuffle.
+        sampler = sampler
+        shuffle = False
+    else:
+        sampler = None if rank == -1 else distributed.DistributedSampler(dataset, shuffle=shuffle)
     generator = torch.Generator()
     generator.manual_seed(6148914691236517205 + RANK)
     return InfiniteDataLoader(

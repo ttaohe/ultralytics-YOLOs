@@ -3,13 +3,93 @@
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.data.multiview_dataset import MultiviewDataset
 from ultralytics.utils import LOGGER, colorstr, RANK
+from ultralytics.utils.torch_utils import torch_distributed_zero_first
 from ultralytics.data.augment import Compose, LetterBox, Format, RandomHSV, RandomFlip
+import random
 import os
 import torch
 import numpy as np
 import cv2
 from pathlib import Path
 from copy import copy
+
+
+class VideoSparseSampler(torch.utils.data.Sampler):
+    """
+    Sparse sampler for multiview video frames.
+
+    For each video segment, pick a random start offset each epoch, then keep frames with fixed stride.
+    This operates on scene indices (not per-view indices).
+    """
+
+    def __init__(self, dataset, stride=5, random_start=True, shuffle=True, seed=0):
+        self.dataset = dataset
+        self.stride = max(int(stride), 1)
+        self.random_start = bool(random_start)
+        self.shuffle = bool(shuffle)
+        self.seed = int(seed)
+        self.epoch = 0
+        self.num_views = int(getattr(dataset, "num_views", 1) or 1)
+        self._video_items = self._build_index()
+
+    def _parse_video_frame(self, im_file):
+        stem = Path(im_file).stem  # e.g., 30-1_00000669
+        # Video id = part before '-' (scene id). Fallback to full stem.
+        video_id = stem
+        frame_id = 0
+        try:
+            parts = stem.split("-")
+            if len(parts) >= 2:
+                video_id = parts[0]
+            if "_" in stem:
+                frame_str = stem.split("_")[-1]
+                frame_id = int(frame_str.lstrip("0") or "0")
+        except Exception:
+            pass
+        return video_id, frame_id
+
+    def _build_index(self):
+        video_items = {}
+        n_scenes = len(self.dataset)
+        for scene_idx in range(n_scenes):
+            base_idx = scene_idx * self.num_views
+            if base_idx >= len(self.dataset.im_files):
+                break
+            im_file = self.dataset.im_files[base_idx]
+            video_id, frame_id = self._parse_video_frame(im_file)
+            video_items.setdefault(video_id, []).append((scene_idx, frame_id))
+        # Sort each video list by frame id to keep temporal order
+        for vid in video_items:
+            video_items[vid].sort(key=lambda x: x[1])
+        return video_items
+
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
+    def _select_indices(self):
+        if self.stride <= 1:
+            indices = list(range(len(self.dataset)))
+            if self.shuffle:
+                rng = random.Random(self.seed + self.epoch)
+                rng.shuffle(indices)
+            return indices
+
+        rng = random.Random(self.seed + self.epoch)
+        selected = []
+        for vid, items in self._video_items.items():
+            offset = rng.randint(0, self.stride - 1) if self.random_start else 0
+            for scene_idx, frame_id in items:
+                if (frame_id - offset) % self.stride == 0:
+                    selected.append(scene_idx)
+        if self.shuffle:
+            rng.shuffle(selected)
+        return selected
+
+    def __iter__(self):
+        return iter(self._select_indices())
+
+    def __len__(self):
+        return len(self._select_indices())
 
 class MultiviewTrainer(DetectionTrainer):
     """
@@ -54,17 +134,23 @@ class MultiviewTrainer(DetectionTrainer):
         if hyp is None:
             hyp = self.args
 
+        use_random_crop = getattr(hyp, "random_crop_size", 0) > 0 and getattr(hyp, "random_crop_prob", 0.0) > 0
         if self.augment:
             # For multiview, disable geometric augmentations that break consistency
-            # Keep only: LetterBox resize, HSV color, Flip (same seed applied across views)
-            transforms = Compose([
-                LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False),
-                RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
-                RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=[]),
-                RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=[]),
-            ])
+            # Keep only: HSV color, Flip. Skip LetterBox when random crop is enabled.
+            t_list = []
+            if not use_random_crop:
+                t_list.append(LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False))
+            t_list.extend(
+                [
+                    RandomHSV(hgain=hyp.hsv_h, sgain=hyp.hsv_s, vgain=hyp.hsv_v),
+                    RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=[]),
+                    RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=[]),
+                ]
+            )
+            transforms = Compose(t_list)
         else:
-            transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+            transforms = Compose([] if use_random_crop else [LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
 
         transforms.append(
             Format(
@@ -80,6 +166,17 @@ class MultiviewTrainer(DetectionTrainer):
             )
         )
         return transforms
+
+    def progress_string(self):
+        """Return a formatted string of training progress with run name prefix."""
+        prefix = f"[{self.args.name}] " if getattr(self.args, "name", None) else ""
+        return ("\n" + prefix + "%11s" * (4 + len(self.loss_names))) % (
+            "Epoch",
+            "GPU_mem",
+            *self.loss_names,
+            "Instances",
+            "Size",
+        )
 
     def build_dataset(self, img_path, mode="train", batch=None):
         """
@@ -132,13 +229,57 @@ class MultiviewTrainer(DetectionTrainer):
             pe_mmap=pe_mmap,
             pe_lmdb=pe_lmdb,
             pe_disable=pe_disable,
+            random_crop_size=getattr(self.args, "random_crop_size", 0) if mode == "train" else 0,
+            random_crop_prob=getattr(self.args, "random_crop_prob", 0.0) if mode == "train" else 0.0,
         )
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         """
         Construct and return dataloader.
         """
-        return super().get_dataloader(dataset_path, batch_size, rank, mode)
+        assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
+
+        original_imgsz = self.args.imgsz
+        if mode == "val" and self.val_imgsz > 0:
+            self.args.imgsz = self.val_imgsz
+            LOGGER.info(f"Using high-resolution validation with imgsz={self.val_imgsz}")
+
+        try:
+            with torch_distributed_zero_first(rank):
+                dataset = self.build_dataset(dataset_path, mode, batch_size)
+
+            shuffle = mode == "train"
+            if getattr(dataset, "rect", False) and shuffle:
+                LOGGER.warning("'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
+                shuffle = False
+
+            sampler = None
+            video_stride = int(getattr(self.args, "video_stride", 1) or 1)
+            if mode == "train" and video_stride > 1:
+                if rank != -1:
+                    LOGGER.warning("Video sparse sampling is not supported with DDP; falling back to default sampler.")
+                else:
+                    sampler = VideoSparseSampler(
+                        dataset=dataset,
+                        stride=video_stride,
+                        random_start=bool(getattr(self.args, "video_rand_start", True)),
+                        shuffle=shuffle,
+                        seed=int(getattr(self.args, "seed", 0) or 0),
+                    )
+                    shuffle = False
+
+            from ultralytics.data.build import build_dataloader
+            return build_dataloader(
+                dataset,
+                batch=batch_size,
+                workers=self.args.workers if mode == "train" else self.args.workers * 2,
+                shuffle=shuffle,
+                rank=rank,
+                drop_last=self.args.compile and mode == "train",
+                sampler=sampler,
+            )
+        finally:
+            self.args.imgsz = original_imgsz
 
     def get_model(self, cfg=None, weights=None, verbose=True):
         """
@@ -159,7 +300,7 @@ class MultiviewTrainer(DetectionTrainer):
         Return a MultiviewValidator for YOLO Multiview model validation.
         Computes metrics separately for each camera view.
         """
-        self.loss_names = "box_loss", "cls_loss", "dfl_loss"
+        self.loss_names = "box_loss", "cls_loss", "dfl_loss", "align_loss"
         from ultralytics.models.yolo.multiview.val import MultiviewValidator
 
         # Copy args and remove custom attributes that aren't valid YOLO args
@@ -182,6 +323,52 @@ class MultiviewTrainer(DetectionTrainer):
         )
         validator.num_views = num_views
         return validator
+
+    def save_metrics(self, metrics):
+        """Save training metrics to CSV, optionally minimal columns for multiview."""
+        if getattr(self.args, "results_minimal", False):
+            keep = {
+                # overall
+                "metrics/mAP50(B)",
+                "metrics/mAP50-95(B)",
+                # per-view
+                "metrics/mAP50(B)_view1",
+                "metrics/mAP50-95(B)_view1",
+                "metrics/mAP50(B)_view2",
+                "metrics/mAP50-95(B)_view2",
+                # overlap per-view
+                "metrics/mAP50(B)_overlap_view1",
+                "metrics/mAP50-95(B)_overlap_view1",
+                "metrics/mAP50(B)_overlap_view2",
+                "metrics/mAP50-95(B)_overlap_view2",
+                # align loss
+                "train/align_loss",
+                "val/align_loss",
+            }
+            metrics = {k: v for k, v in metrics.items() if k in keep}
+            # shorten column names for readability
+            rename = {
+                "metrics/mAP50(B)": "mAP50_all",
+                "metrics/mAP50-95(B)": "mAP50-95_all",
+                "metrics/mAP50(B)_view1": "mAP50_v1",
+                "metrics/mAP50-95(B)_view1": "mAP50-95_v1",
+                "metrics/mAP50(B)_view2": "mAP50_v2",
+                "metrics/mAP50-95(B)_view2": "mAP50-95_v2",
+                "metrics/mAP50(B)_overlap_view1": "mAP50_ov_v1",
+                "metrics/mAP50-95(B)_overlap_view1": "mAP50-95_ov_v1",
+                "metrics/mAP50(B)_overlap_view2": "mAP50_ov_v2",
+                "metrics/mAP50-95(B)_overlap_view2": "mAP50-95_ov_v2",
+                "train/align_loss": "train_align",
+                "val/align_loss": "val_align",
+            }
+            metrics = {rename.get(k, k): v for k, v in metrics.items()}
+        return super().save_metrics(metrics)
+
+    def plot_metrics(self):
+        """Plot metrics from a CSV file (skip when minimal results enabled)."""
+        if getattr(self.args, "results_minimal", False):
+            return
+        return super().plot_metrics()
 
     def plot_training_samples(self, batch, ni):
         """

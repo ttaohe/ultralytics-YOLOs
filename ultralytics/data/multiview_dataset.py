@@ -101,7 +101,17 @@ class MultiviewDataset(YOLODataset):
             return pe
 
         pe_filename = im_path.stem + "_pe.npy"
-        pes_npz_dir = im_path.parents[2] / 'pes_npz' / im_path.parent.name
+        split = im_path.parent.name
+        pe_root = None
+        if hasattr(self, "data") and self.data:
+            pe_dirs = self.data.get("pe_npz_dirs")
+            if isinstance(pe_dirs, dict):
+                cam_name = im_path.parents[2].name
+                if cam_name in pe_dirs:
+                    pe_root = Path(pe_dirs[cam_name])
+        if pe_root is None:
+            pe_root = im_path.parents[2] / "pes_npz"
+        pes_npz_dir = pe_root / split
         pe_path = pes_npz_dir / pe_filename.replace("_pe.npy", "_pe.npz")
         if not pe_path.exists():
             raise FileNotFoundError(f"PE npz not found: {pe_path}")
@@ -220,12 +230,19 @@ class MultiviewDataset(YOLODataset):
                 with open(cache_path, 'rb') as f:
                     cached_data = pickle.load(f)
 
-                # Verify cache is still valid
+                # Verify cache is still valid unless explicitly disabled
+                skip_hash = bool(self.data.get("multiview_cache_ignore_hash", False)) if hasattr(self, "data") else False
                 cached_hash = get_hash([str(base_path / cam_dir / "images" / mode) for cam_dir in self._camera_dirs])
-                if cached_data.get('hash') == cached_hash:
+                if skip_hash or cached_data.get('hash') == cached_hash:
                     self.im_files = cached_data['im_files']
                     self.label_files = cached_data['label_files']
-                    LOGGER.info(f"{self.prefix}Loaded {len(self.im_files)} multiview images from cache {cache_path.name}")
+                    if skip_hash:
+                        LOGGER.info(
+                            f"{self.prefix}Loaded {len(self.im_files)} multiview images from cache {cache_path.name} "
+                            "(hash check skipped)"
+                        )
+                    else:
+                        LOGGER.info(f"{self.prefix}Loaded {len(self.im_files)} multiview images from cache {cache_path.name}")
                     # Still need to update labels, ni, etc.
                     self._rebuild_labels_after_file_load()
                     return
@@ -674,6 +691,7 @@ class MultiviewDataset(YOLODataset):
             'ori_shape': [d['ori_shape'] for d in views_data],
             'resized_shape': [d['resized_shape'] for d in views_data],
             'ratio_pad': ratio_pads,
+            'crop_window_ori': [d.get('crop_window_ori', (0, 0, 0, 0)) for d in views_data],
         }
         return data
 
@@ -746,14 +764,17 @@ class MultiviewDataset(YOLODataset):
         ori_shapes = []
         resized_shapes = []
         ratio_pads = []
+        crop_windows_ori = []
         for sample in batch:
             im_files.extend(sample['im_file'])
             ori_shapes.extend(sample['ori_shape'])
             resized_shapes.extend(sample['resized_shape'])
             ratio_pads.extend(sample['ratio_pad'])
+            crop_windows_ori.extend(sample.get('crop_window_ori', [(0, 0, 0, 0)] * len(sample['im_file'])))
         new_batch['im_file'] = im_files
         new_batch['ori_shape'] = ori_shapes
         new_batch['resized_shape'] = resized_shapes
         new_batch['ratio_pad'] = ratio_pads
+        new_batch['crop_window_ori'] = crop_windows_ori
 
         return new_batch

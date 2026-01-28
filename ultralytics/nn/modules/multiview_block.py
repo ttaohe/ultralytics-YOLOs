@@ -36,7 +36,8 @@ class MultiviewFusionBlock(nn.Module):
     Fuses features from multiple views using geographic coordinates as positional embeddings.
     """
     def __init__(self, c1, c2, num_views=1, hidden_dim=256,
-                 downsample_factor=4, use_window_attn=False, window_size=7):
+                 downsample_factor=4, use_window_attn=False, window_size=7,
+                 strict_overlap_mask=False):
         """
         Args:
             c1: Input channels
@@ -47,6 +48,7 @@ class MultiviewFusionBlock(nn.Module):
                             This reduces L from V*H*W to V*(H/df)*(W/df)
             use_window_attn: Whether to use window attention (more accurate but slower)
             window_size: Window size for local attention (only if use_window_attn=True)
+            strict_overlap_mask: If True, only fuse on overlap and passthrough elsewhere.
         """
         super().__init__()
         self.num_views = num_views
@@ -56,14 +58,25 @@ class MultiviewFusionBlock(nn.Module):
         self.downsample_factor = downsample_factor
         self.use_window_attn = use_window_attn
         self.window_size = window_size
+        self.strict_overlap_mask = strict_overlap_mask
         self.const_pe_eps = 1e-6
         self.attn_mask_max_len = 4096
+        self.mask_key_enabled = True
         self.overlap_low = 0.18
         self.overlap_high = 0.45
-        self.overlap_weight_enabled = True
+        self.overlap_weight_enabled = False
+        self.align_loss_enabled = True
+        self.align_loss_eps = 1e-6
+        self.gate_method = "gate_pe"  # residual02 | gate_xout | gate_pe | gt_soft
+        self.fuse_alpha = 0.5
+        self.fuse_beta = 0.5
+        self.fg_gate_fg = 1.0
+        self.fg_gate_bg = 0.2
+        self.fg_mask = None
         self.export_attn = False
         self.export_attn_max_len = 2048
         self.last_attn_maps = None
+        self.last_align_loss = None
 
         # Projections
         self.q_proj = nn.Conv2d(c1, hidden_dim, 1)
@@ -75,6 +88,15 @@ class MultiviewFusionBlock(nn.Module):
 
         # Output Projection
         self.out_proj = nn.Conv2d(hidden_dim, c2, 1)
+        # Gates
+        self.gate_xout = nn.Sequential(
+            nn.Conv2d(c1 + c2, 1, 1),
+            nn.Sigmoid(),
+        )
+        self.gate_pe = nn.Sequential(
+            nn.Conv2d(4, 1, 1),
+            nn.Sigmoid(),
+        )
 
         # Downsample/upsample for efficient attention
         self.downsample = nn.Conv2d(hidden_dim, hidden_dim,
@@ -98,6 +120,9 @@ class MultiviewFusionBlock(nn.Module):
 
         if B * V != B_V:
             return x
+
+        # reset per-forward align loss
+        self.last_align_loss = None
 
         # 1. Resize coords to match feature map resolution
         coords_reshaped = coords.view(B*V, H_img, W_img, 4).permute(0, 3, 1, 2)
@@ -146,7 +171,7 @@ class MultiviewFusionBlock(nn.Module):
 
         # Build key mask from constant PE regions (supports 2-view encoding)
         attn_key_mask = None
-        overlap_mask = None
+        overlap_mask_full = None
         overlap_weight = None
         if V == 2:
             const0 = torch.tensor([1.0, 0.0, 1.0, 0.0], device=coords_feat.device, dtype=coords_feat.dtype)
@@ -154,15 +179,15 @@ class MultiviewFusionBlock(nn.Module):
             diff0 = (coords_feat[:, 0] - const0).abs().amax(dim=-1)
             diff1 = (coords_feat[:, 1] - const1).abs().amax(dim=-1)
             valid_mask = torch.stack([diff0, diff1], dim=1) > self.const_pe_eps  # (B, V, H, W)
+            overlap_mask_full = valid_mask.all(dim=1, keepdim=True)  # (B, 1, H, W)
             if self.downsample_factor > 1:
                 df = self.downsample_factor
                 valid_mask = F.max_pool2d(valid_mask.float(), kernel_size=df, stride=df) > 0
-            overlap_mask = valid_mask.all(dim=1, keepdim=True)  # (B, 1, H, W)
             if self.overlap_weight_enabled:
                 overlap_ratio = valid_mask.float().mean(dim=(1, 2, 3))  # (B,)
                 denom = max(self.overlap_high - self.overlap_low, 1e-6)
                 overlap_weight = ((overlap_ratio - self.overlap_low) / denom).clamp(0.0, 1.0)
-            if H_new * W_new * V <= self.attn_mask_max_len:
+            if self.mask_key_enabled and H_new * W_new * V <= self.attn_mask_max_len:
                 attn_key_mask = (~valid_mask).reshape(B, V * H_new * W_new)  # True = mask key
 
         # Flatten for attention: (B, V*H_new*W_new, D)
@@ -214,12 +239,44 @@ class MultiviewFusionBlock(nn.Module):
 
         # Residual connection
         if self.c1 == self.c2:
-            if overlap_mask is not None:
-                overlap_mask = overlap_mask.repeat_interleave(V, dim=0)
-                out = out * overlap_mask + x * (1.0 - overlap_mask)
+            if self.strict_overlap_mask and overlap_mask_full is not None:
+                overlap_mask_full_float = overlap_mask_full.to(out.dtype)
+                overlap_mask_full_float = overlap_mask_full_float.repeat_interleave(V, dim=0)
+                out = out * overlap_mask_full_float + x * (1.0 - overlap_mask_full_float)
             if overlap_weight is not None:
                 out = out * overlap_weight.view(B, 1, 1, 1).repeat_interleave(V, dim=0)
-            return x + out
+            if self.gate_method == "residual02":
+                fused = x + 0.2 * out
+            elif self.gate_method == "gate_xout":
+                gate = self.gate_xout(torch.cat([x, out], dim=1))
+                fused = x + gate * out
+            elif self.gate_method == "gate_pe":
+                gate = self.gate_pe(coords_feat.permute(0, 1, 4, 2, 3).reshape(B * V, 4, H, W))
+                fused = self.fuse_alpha * x + self.fuse_beta * (gate * out)
+            elif self.gate_method == "gt_soft":
+                if self.training and self.fg_mask is not None:
+                    fg = self.fg_mask
+                    if fg.shape[-2:] != (H, W):
+                        fg = F.interpolate(fg, size=(H, W), mode="nearest")
+                    gate = fg * self.fg_gate_fg + (1.0 - fg) * self.fg_gate_bg
+                else:
+                    gate = self.gate_pe(coords_feat.permute(0, 1, 4, 2, 3).reshape(B * V, 4, H, W))
+                fused = self.fuse_alpha * x + self.fuse_beta * (gate * out)
+            else:
+                fused = x + out
+            if self.align_loss_enabled and overlap_mask_full is not None and self.training:
+                # cosine alignment loss on overlap region
+                x_view = x.view(B, V, C, H, W)
+                f1 = x_view[:, 0]
+                f2 = x_view[:, 1]
+                f1n = F.normalize(f1, dim=1, eps=self.align_loss_eps)
+                f2n = F.normalize(f2, dim=1, eps=self.align_loss_eps)
+                cos = (f1n * f2n).sum(dim=1)  # (B, H, W)
+                align = 1.0 - cos
+                mask = overlap_mask_full[:, 0].to(align.dtype)
+                denom = mask.sum().clamp_min(self.align_loss_eps)
+                self.last_align_loss = (align * mask).sum() / denom
+            return fused
         return out
 
 

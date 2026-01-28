@@ -4,7 +4,7 @@
 # Data structure:
 #   - Images are stored separately in camera1/ and camera2/ directories
 #   - Each scene has corresponding views: 23-1_XXXXXX.jpg (camera1) and 23-2_XXXXXX.jpg (camera2)
-#   - Position encodings (PE) are in pes/ folder: camera1/pes/ and camera2/pes/
+#   - Position encodings (PE) are in pes_npz/ folder or external SSD dirs per camera
 #   - Labels are in labels/ folder: camera1/labels/ and camera2/labels/
 
 # Root path for multiview data
@@ -32,3 +32,8 @@ camera_dirs:
 
 # Use memory-mapped PE loading to reduce memory copies
 pe_mmap: true
+
+# Optional: override PE npz roots per camera (e.g., SSD paths)
+pe_npz_dirs:
+  camera1: /data_tmp/camera1_pes_npz
+  camera2: /data_tmp/camera2_pes_npz

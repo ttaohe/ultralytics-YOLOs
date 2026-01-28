@@ -370,9 +370,68 @@ class BaseModel(torch.nn.Module):
         if getattr(self, "criterion", None) is None:
             self.criterion = self.init_criterion()
 
+        # Optional GT foreground mask for gate_method=gt_soft
+        fg_mask = None
+        if preds is None and "bboxes" in batch and "batch_idx" in batch:
+            try:
+                use_fg_gate = False
+                for m in self.model:
+                    if getattr(m, "gate_method", None) == "gt_soft":
+                        use_fg_gate = True
+                        break
+                if use_fg_gate:
+                    imgs = batch["img"]
+                    bv, _, h, w = imgs.shape
+                    fg_mask = torch.zeros((bv, 1, h, w), device=imgs.device, dtype=imgs.dtype)
+                    bboxes = batch["bboxes"]
+                    bidx = batch["batch_idx"].long()
+                    if bboxes.numel():
+                        x, y, bw, bh = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+                        x1 = (x - bw * 0.5) * w
+                        y1 = (y - bh * 0.5) * h
+                        x2 = (x + bw * 0.5) * w
+                        y2 = (y + bh * 0.5) * h
+                        x1 = x1.clamp(0, w - 1).long()
+                        y1 = y1.clamp(0, h - 1).long()
+                        x2 = x2.clamp(0, w).long()
+                        y2 = y2.clamp(0, h).long()
+                        for i in range(bboxes.shape[0]):
+                            bi = int(bidx[i])
+                            if bi < 0 or bi >= bv:
+                                continue
+                            if x2[i] <= x1[i] or y2[i] <= y1[i]:
+                                continue
+                            fg_mask[bi, 0, y1[i] : y2[i], x1[i] : x2[i]] = 1.0
+                    for m in self.model:
+                        if hasattr(m, "fg_mask"):
+                            m.fg_mask = fg_mask
+            except Exception:
+                fg_mask = None
+
         if preds is None:
             preds = self.forward(batch["img"], coords=batch.get("coords"))
-        return self.criterion(preds, batch)
+        # clear fg_mask after forward
+        if fg_mask is not None:
+            for m in self.model:
+                if hasattr(m, "fg_mask"):
+                    m.fg_mask = None
+        loss, loss_items = self.criterion(preds, batch)
+        # Add multiview alignment loss (cosine on overlap) and expose for logging.
+        align_weight = float(getattr(self.args, "align_loss_weight", 0.0) or 0.0)
+        align_losses = []
+        for m in self.model:
+            if hasattr(m, "last_align_loss") and m.last_align_loss is not None:
+                align_losses.append(m.last_align_loss)
+        if align_losses:
+            align_loss = torch.stack(align_losses).mean()
+        else:
+            align_loss = torch.zeros(1, device=loss.device, dtype=loss.dtype).squeeze(0)
+        if align_weight > 0:
+            loss = loss + align_weight * align_loss
+        # Append align loss for logging (keeps scalar tensor)
+        if isinstance(loss_items, torch.Tensor):
+            loss_items = torch.cat([loss_items, align_loss.detach().unsqueeze(0)])
+        return loss, loss_items
 
     def init_criterion(self):
         """Initialize the loss criterion for the BaseModel."""
