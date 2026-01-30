@@ -31,6 +31,15 @@ class MultiviewDataset(YOLODataset):
         self._pe_lmdb = pe_lmdb
         self._pe_lmdb_envs = {}
         self._pe_disable = pe_disable
+        # Capture val_original from kwargs early (workers may not have self.args)
+        self.val_original = bool(kwargs.get("val_original", False))
+        # Overlap-aware crop sampling (defaults: mix 70% overlap-prioritized, 30% random)
+        self.overlap_crop_prob = float(kwargs.get("overlap_crop_prob", 0.7))
+        self.overlap_mask_ds = int(kwargs.get("overlap_mask_ds", 16))
+        self.overlap_crop_candidates = int(kwargs.get("overlap_crop_candidates", 8))
+        self._overlap_mask_cache_size = int(kwargs.get("overlap_mask_cache_size", 512))
+        self._overlap_mask_cache = {}
+        self._overlap_mask_cache_order = []
 
         # For separate mode, we need to handle im_files differently
         if self._separate_mode:
@@ -40,6 +49,8 @@ class MultiviewDataset(YOLODataset):
             self._camera_dirs = None
 
         super().__init__(*args, **kwargs)
+        # Cache val_original on dataset to avoid relying on self.args
+        self.val_original = bool(getattr(getattr(self, "args", None), "val_original", False)) or self.val_original
 
         # In separate mode, rebuild im_files to interleave images from all cameras
         if self._separate_mode:
@@ -56,17 +67,74 @@ class MultiviewDataset(YOLODataset):
 
         if hyp is None:
             hyp = self.args
+        use_random_crop = (
+            getattr(hyp, "random_crop_size", 0) > 0 and getattr(hyp, "random_crop_prob", 0.0) > 0.0
+        )
+        val_original = bool(getattr(hyp, "val_original", False))
+        # Keep val_original in sync for load_image (workers may not have self.args)
+        self.val_original = val_original
+
+        class PadToStride:
+            """Pad image to stride without resizing (for val_original)."""
+
+            def __init__(self, stride=32):
+                self.stride = int(stride) if stride else 32
+
+            def __call__(self, labels):
+                if labels is None:
+                    return labels
+                img = labels.get("img")
+                if img is None:
+                    return labels
+                h, w = img.shape[:2]
+                new_h = int(np.ceil(h / self.stride) * self.stride)
+                new_w = int(np.ceil(w / self.stride) * self.stride)
+                pad_h = new_h - h
+                pad_w = new_w - w
+                if pad_h == 0 and pad_w == 0:
+                    labels["resized_shape"] = (h, w)
+                    labels["ratio_pad"] = ((1.0, 1.0), (0, 0))
+                    return labels
+                top = pad_h // 2
+                bottom = pad_h - top
+                left = pad_w // 2
+                right = pad_w - left
+                if img.ndim == 2:
+                    img = img[..., None]
+                if img.shape[2] == 3:
+                    img = cv2.copyMakeBorder(img, top, bottom, left, right, cv2.BORDER_CONSTANT, value=(114, 114, 114))
+                else:
+                    pad_img = np.full((h + top + bottom, w + left + right, img.shape[2]), 114, dtype=img.dtype)
+                    pad_img[top : top + h, left : left + w] = img
+                    img = pad_img
+                labels["img"] = img
+                labels["resized_shape"] = (new_h, new_w)
+                labels["ratio_pad"] = ((1.0, 1.0), (left, top))
+                try:
+                    # update instances with padding offsets
+                    instances = labels.get("instances", None)
+                    if instances is not None:
+                        instances.add_padding(left, top)
+                except Exception:
+                    pass
+                return labels
 
         if self.augment:
             # Only safe geometric augmentations for multiview.
             # HSV is applied separately to RGB channels before PE concatenation.
-            transforms = Compose([
-                LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False),
+            t_list = []
+            if not use_random_crop:
+                t_list.append(LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False))
+            transforms = Compose(t_list + [
                 RandomFlip(direction="vertical", p=hyp.flipud, flip_idx=[]),
                 RandomFlip(direction="horizontal", p=hyp.fliplr, flip_idx=[]),
             ])
         else:
-            transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+            if val_original:
+                LOGGER.info("val_original enabled: skipping LetterBox in val/test.")
+                transforms = Compose([PadToStride(stride=getattr(self, "stride", 32))])
+            else:
+                transforms = Compose([LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
 
         transforms.append(
             Format(
@@ -82,6 +150,24 @@ class MultiviewDataset(YOLODataset):
             )
         )
         return transforms
+
+    def load_image(self, i: int, rect_mode: bool = True):
+        """
+        Override to support val_original: load original image without resizing.
+        """
+        val_original = bool(getattr(self, "val_original", False))
+        if not hasattr(self, "_val_original_logged"):
+            self._val_original_logged = True
+            LOGGER.info(
+                f"{self.prefix}load_image: augment={self.augment}, val_original={val_original}"
+            )
+        if not self.augment and val_original:
+            im = cv2.imread(self.im_files[i], self.cv2_flag)  # BGR
+            if im is None:
+                raise FileNotFoundError(f"Image Not Found {self.im_files[i]}")
+            h0, w0 = im.shape[:2]
+            return im, (h0, w0), (h0, w0)
+        return super().load_image(i, rect_mode=rect_mode)
 
     def _load_pe_from_disk(self, im_file):
         """
@@ -126,6 +212,120 @@ class MultiviewDataset(YOLODataset):
             raise RuntimeError(f"Error loading PE from {pe_path}: {e}") from e
 
         return None
+
+    def _overlap_mask_path_for_image(self, im_path: Path) -> Path | None:
+        """Return overlap mask path for an image based on pe_npz_dirs or default layout."""
+        split = im_path.parent.name
+        pe_root = None
+        if hasattr(self, "data") and self.data:
+            pe_dirs = self.data.get("pe_npz_dirs")
+            if isinstance(pe_dirs, dict):
+                cam_name = im_path.parents[2].name
+                if cam_name in pe_dirs:
+                    pe_root = Path(pe_dirs[cam_name])
+        if pe_root is None:
+            pe_root = im_path.parents[2] / "pes_npz"
+        mask_name = f"{im_path.stem}_overlap_mask_ds{self.overlap_mask_ds}.npy"
+        return pe_root / split / mask_name
+
+    def _load_overlap_mask(self, im_file: str) -> np.ndarray | None:
+        """Load cached overlap mask (uint8) or return None if missing."""
+        try:
+            im_path = Path(im_file)
+        except Exception:
+            return None
+
+        cache_key = str(im_path)
+        if cache_key in self._overlap_mask_cache:
+            return self._overlap_mask_cache[cache_key]
+
+        mask_path = self._overlap_mask_path_for_image(im_path)
+        if not mask_path or not mask_path.exists():
+            return None
+
+        try:
+            mask = np.load(mask_path)
+        except Exception:
+            return None
+
+        # LRU cache
+        self._overlap_mask_cache[cache_key] = mask
+        self._overlap_mask_cache_order.append(cache_key)
+        if len(self._overlap_mask_cache_order) > self._overlap_mask_cache_size:
+            old = self._overlap_mask_cache_order.pop(0)
+            self._overlap_mask_cache.pop(old, None)
+        return mask
+
+    def _sample_overlap_crop_window(
+        self,
+        h: int,
+        w: int,
+        crop: int,
+        label: dict | None = None,
+        im_file: str | None = None,
+        ori_shape: tuple[int, int] | None = None,
+        resized_shape: tuple[int, int] | None = None,
+    ) -> tuple[int, int] | None:
+        """
+        Overlap-aware crop sampling (mix 70% overlap-prioritized, 30% random fallback).
+        Returns (x0, y0) in the current image space, or None to fallback to random.
+        """
+        if np.random.rand() > self.overlap_crop_prob:
+            return None
+
+        if im_file is None and label is not None:
+            im_file = label.get("im_file", None)
+        if im_file is None:
+            return None
+
+        mask = self._load_overlap_mask(im_file)
+        if mask is None:
+            return None
+
+        # Determine mapping to original coords for scoring
+        ori_h, ori_w = ori_shape if ori_shape else (h, w)
+        res_h, res_w = resized_shape if resized_shape else (h, w)
+        r_h = res_h / ori_h if ori_h > 0 else 1.0
+        r_w = res_w / ori_w if ori_w > 0 else 1.0
+
+        mh, mw = mask.shape[:2]
+        ds = max(int(self.overlap_mask_ds), 1)
+
+        def score_window(x0: int, y0: int) -> float:
+            # Map current window to original coords
+            if r_h <= 0 or r_w <= 0:
+                return 0.0
+            x0_o = int(round(x0 / r_w))
+            y0_o = int(round(y0 / r_h))
+            x1_o = int(round((x0 + crop) / r_w))
+            y1_o = int(round((y0 + crop) / r_h))
+
+            x0_o = max(0, min(x0_o, ori_w))
+            y0_o = max(0, min(y0_o, ori_h))
+            x1_o = max(0, min(x1_o, ori_w))
+            y1_o = max(0, min(y1_o, ori_h))
+            if x1_o <= x0_o or y1_o <= y0_o:
+                return 0.0
+
+            mx0 = max(0, min(int(x0_o / ds), mw))
+            my0 = max(0, min(int(y0_o / ds), mh))
+            mx1 = max(0, min(int(np.ceil(x1_o / ds)), mw))
+            my1 = max(0, min(int(np.ceil(y1_o / ds)), mh))
+            if mx1 <= mx0 or my1 <= my0:
+                return 0.0
+            return float(mask[my0:my1, mx0:mx1].mean())
+
+        best = None
+        best_score = -1.0
+        for _ in range(max(int(self.overlap_crop_candidates), 1)):
+            x0 = np.random.randint(0, w - crop + 1)
+            y0 = np.random.randint(0, h - crop + 1)
+            s = score_window(x0, y0)
+            if s > best_score:
+                best_score = s
+                best = (x0, y0)
+
+        return best
 
     def _lmdb_path_for_image(self, im_path: Path) -> Path | None:
         if not self._pe_lmdb:
@@ -630,11 +830,22 @@ class MultiviewDataset(YOLODataset):
                 _, h_new, w_new = label['img'].shape
                 label['pe'] = torch.zeros((4, h_new, w_new), dtype=label['img'].dtype)
             else:
-                # Load PE at the RESIZED image size (not original size!)
-                # Because load_image already resized the image before transforms
+                # Load PE aligned to the current crop (if any) from original PE
                 im_file = self.im_files[start_idx + v]
-                res_h, res_w = label['resized_shape']  # (H, W) - the size AFTER load_image resize
-                pe = self.load_coords(im_file, (res_h, res_w))  # (H, W, 4)
+                ori_h, ori_w = label.get('ori_shape', label.get('resized_shape'))
+                res_h, res_w = label.get('resized_shape')  # current image size
+                crop_x0, crop_y0, crop_x1, crop_y1 = label.get('crop_window_ori', (0, 0, 0, 0))
+
+                # Load PE at original size, then crop to crop_window_ori if available
+                pe = self.load_coords(im_file, (ori_h, ori_w))
+                if crop_x1 > crop_x0 and crop_y1 > crop_y0:
+                    pe = pe[crop_y0:crop_y1, crop_x0:crop_x1, :]
+
+                # Resize PE to match current image size if needed
+                if pe.shape[:2] != (res_h, res_w):
+                    pe = torch.from_numpy(
+                        cv2.resize(pe.numpy(), (res_w, res_h), interpolation=cv2.INTER_LINEAR)
+                    ).float()
 
                 # Concatenate PE with image: (H, W, 3+4) -> (H, W, 7)
                 # This ensures PE and image go through the SAME transforms

@@ -27,6 +27,24 @@ def train():
     parser.add_argument("--name", type=str, default="xxxx")
     parser.add_argument("--num_views", type=int, default=2)
     parser.add_argument("--val-imgsz", type=int, default=0, help="Override validation image size (0 disables)")
+    parser.add_argument("--val-tile", action="store_true", help="Enable sliding-window val/test")
+    parser.add_argument("--val-tile-size", type=int, default=640, help="Tile size for val/test sliding window")
+    parser.add_argument("--val-tile-stride", type=int, default=480, help="Tile stride for val/test sliding window")
+    parser.add_argument(
+        "--val-tile-disable-fusion",
+        action="store_true",
+        help="Disable multiview fusion (coords=None) during tiled val/test",
+    )
+    parser.add_argument(
+        "--val-tile-original",
+        action="store_true",
+        help="Use original-resolution tiles for val/test (no letterbox tiles)",
+    )
+    parser.add_argument(
+        "--val-original",
+        action="store_true",
+        help="Validate on original image size (skip LetterBox)",
+    )
     parser.add_argument("--cache", type=str, default='False')
     parser.add_argument("--patience", type=int, default=50)
     parser.add_argument("--save_period", type=int, default=-1)
@@ -97,6 +115,10 @@ def train():
     )
     opt = parser.parse_args()
 
+    # If val_original is enabled, ignore val_imgsz to avoid forced resize/letterbox.
+    if opt.val_original:
+        opt.val_imgsz = 0
+
     # Load data config
     data_dict = YAML.load(opt.data)
     if opt.pe_lmdb:
@@ -125,6 +147,7 @@ def train():
     # Create trainer with all necessary parameters in overrides
     # Note: num_views is NOT a standard YOLO argument, so we don't pass it here.
     # Instead, MultiviewTrainer will read it from self.data (the data config file)
+    
     trainer = MultiviewTrainer(
         overrides={
             "model": opt.model,
@@ -153,6 +176,12 @@ def train():
             "gate_method": opt.gate_method,
             "random_crop_size": opt.random_crop_size,
             "random_crop_prob": opt.random_crop_prob,
+            "val_original": opt.val_original,
+            "val_tile": opt.val_tile,
+            "val_tile_size": opt.val_tile_size,
+            "val_tile_stride": opt.val_tile_stride,
+            "val_tile_disable_fusion": opt.val_tile_disable_fusion,
+            "val_tile_original": opt.val_tile_original,
         }
     )
 
@@ -200,6 +229,14 @@ def train():
     trainer.data = data_dict
     if opt.val_imgsz and opt.val_imgsz > 0:
         trainer.val_imgsz = int(opt.val_imgsz)
+    if opt.val_tile:
+        trainer.args.val_tile = True
+        trainer.args.val_tile_size = int(opt.val_tile_size)
+        trainer.args.val_tile_stride = int(opt.val_tile_stride)
+        trainer.args.val_tile_disable_fusion = bool(opt.val_tile_disable_fusion)
+        trainer.args.val_tile_original = bool(opt.val_tile_original)
+    if opt.val_original:
+        trainer.args.val_original = True
 
     if opt.strict_overlap_mask:
         def _set_strict_overlap(tr):

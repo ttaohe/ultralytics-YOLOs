@@ -287,9 +287,16 @@ class YOLODataset(BaseDataset):
             
             # Check if original image is large enough to crop
             if ori_h >= crop and ori_w >= crop:
-                # Crop directly from original image
-                y0 = np.random.randint(0, ori_h - crop + 1)
-                x0 = np.random.randint(0, ori_w - crop + 1)
+                # Crop directly from original image (subclasses may override sampling)
+                x0, y0 = self._sample_crop_window(
+                    h=ori_h,
+                    w=ori_w,
+                    crop=crop,
+                    label=label,
+                    im_file=f,
+                    ori_shape=(ori_h, ori_w),
+                    resized_shape=(ori_h, ori_w),
+                )
                 y1, x1 = y0 + crop, x0 + crop
                 
                 img_crop = img_ori[y0:y1, x0:x1]
@@ -367,9 +374,16 @@ class YOLODataset(BaseDataset):
         if h <= crop or w <= crop:
             return label
 
-        # Random crop window on resized image
-        y0 = np.random.randint(0, h - crop + 1)
-        x0 = np.random.randint(0, w - crop + 1)
+        # Random crop window on resized image (subclasses may override sampling)
+        x0, y0 = self._sample_crop_window(
+            h=h,
+            w=w,
+            crop=crop,
+            label=label,
+            im_file=label.get("im_file", None),
+            ori_shape=label.get("ori_shape", (h, w)),
+            resized_shape=label.get("resized_shape", (h, w)),
+        )
         y1, x1 = y0 + crop, x0 + crop
 
         # Crop image
@@ -411,6 +425,39 @@ class YOLODataset(BaseDataset):
         label["resized_shape"] = (crop, crop)
 
         return label
+
+    def _sample_crop_window(
+        self,
+        h: int,
+        w: int,
+        crop: int,
+        label: dict | None = None,
+        im_file: str | None = None,
+        ori_shape: tuple[int, int] | None = None,
+        resized_shape: tuple[int, int] | None = None,
+    ) -> tuple[int, int]:
+        """
+        Sample a crop window (x0, y0). Subclasses may override with overlap-aware logic.
+        """
+        if hasattr(self, "_sample_overlap_crop_window"):
+            try:
+                xy = self._sample_overlap_crop_window(
+                    h=h,
+                    w=w,
+                    crop=crop,
+                    label=label,
+                    im_file=im_file,
+                    ori_shape=ori_shape,
+                    resized_shape=resized_shape,
+                )
+                if xy is not None:
+                    return xy
+            except Exception:
+                pass
+
+        y0 = np.random.randint(0, h - crop + 1)
+        x0 = np.random.randint(0, w - crop + 1)
+        return x0, y0
 
     def update_labels_info(self, label: dict) -> dict:
         """

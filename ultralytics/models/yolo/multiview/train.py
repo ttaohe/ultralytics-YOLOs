@@ -135,6 +135,7 @@ class MultiviewTrainer(DetectionTrainer):
             hyp = self.args
 
         use_random_crop = getattr(hyp, "random_crop_size", 0) > 0 and getattr(hyp, "random_crop_prob", 0.0) > 0
+        val_original = bool(getattr(hyp, "val_original", False))
         if self.augment:
             # For multiview, disable geometric augmentations that break consistency
             # Keep only: HSV color, Flip. Skip LetterBox when random crop is enabled.
@@ -150,7 +151,12 @@ class MultiviewTrainer(DetectionTrainer):
             )
             transforms = Compose(t_list)
         else:
-            transforms = Compose([] if use_random_crop else [LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)])
+            if val_original:
+                transforms = Compose([])
+            else:
+                transforms = Compose(
+                    [] if use_random_crop else [LetterBox(new_shape=(self.imgsz, self.imgsz), scaleup=False)]
+                )
 
         transforms.append(
             Format(
@@ -480,12 +486,100 @@ class MultiviewTrainer(DetectionTrainer):
         cv2.putText(mosaic, title, (10, 25),
                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-        # Save PE visualization
+        # Save PE visualization (cropped view)
         pe_fname = self.save_dir / f"train_batch{ni}_pe.jpg"
         cv2.imwrite(str(pe_fname), mosaic)
 
         if self.args.plots:
             LOGGER.info(f"{colorstr('bold')}Saved PE visualization to {pe_fname.name}")
+
+        # Also save original (uncropped) PE overlay + crop window for first batch
+        if ni == 0:
+            try:
+                self._plot_position_encodings_original(batch, ni, num_views)
+            except Exception as e:
+                LOGGER.warning(f"{colorstr('yellow')}Failed to save original PE visualization: {e}")
+
+    def _plot_position_encodings_original(self, batch, ni, num_views):
+        """Save original (uncropped) PE overlay with crop window rectangles for comparison."""
+        im_files = batch.get("im_file", [])
+        crop_windows = batch.get("crop_window_ori", [])
+        if not im_files:
+            return
+
+        dataset = getattr(self.train_loader, "dataset", None)
+        if dataset is None or not hasattr(dataset, "_load_pe_from_disk"):
+            return
+
+        # Limit number of images to plot
+        max_subplots = 16
+        bs = min(len(im_files), max_subplots)
+        ns = int(np.ceil(bs**0.5))
+
+        # Load originals and PE
+        imgs = []
+        pes = []
+        for i in range(bs):
+            f = im_files[i]
+            img = cv2.imread(f)  # BGR
+            if img is None:
+                img = np.zeros((10, 10, 3), dtype=np.uint8)
+            pe = dataset._load_pe_from_disk(f)
+            if pe is None:
+                pe = torch.zeros((img.shape[0], img.shape[1], 4), dtype=torch.float32)
+            else:
+                pe = pe.float()
+                if tuple(pe.shape[:2]) != tuple(img.shape[:2]):
+                    pe = torch.from_numpy(
+                        cv2.resize(pe.numpy(), (img.shape[1], img.shape[0]), interpolation=cv2.INTER_LINEAR)
+                    ).float()
+            imgs.append(img)
+            pes.append(pe.numpy())
+
+        # Build mosaic grid
+        h0, w0 = imgs[0].shape[:2]
+        mosaic = np.full((int(ns * h0), int(ns * w0), 3), 255, dtype=np.uint8)
+
+        for i in range(bs):
+            x, y = int(w0 * (i // ns)), int(h0 * (i % ns))
+            img = imgs[i]
+            pe = pes[i]
+
+            pe_norm = ((pe + 1) / 2 * 255).astype(np.uint8)
+            pe_vis = np.stack([pe_norm[:, :, 0], pe_norm[:, :, 1], pe_norm[:, :, 2]], axis=2)
+
+            blended = cv2.addWeighted(img, 0.6, pe_vis, 0.4, 0)
+
+            # Draw crop window (original coords) if present
+            if i < len(crop_windows):
+                x0, y0, x1, y1 = crop_windows[i]
+                if x1 > x0 and y1 > y0:
+                    cv2.rectangle(blended, (x0, y0), (x1 - 1, y1 - 1), (0, 0, 255), 2)
+
+            # Place in mosaic (resize if needed)
+            if blended.shape[:2] != (h0, w0):
+                blended = cv2.resize(blended, (w0, h0))
+            mosaic[y:y+h0, x:x+w0, :] = blended
+
+            # Filename text
+            filename = Path(im_files[i]).name[:30]
+            cv2.putText(mosaic, filename, (x + 5, y + 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 0), 1)
+
+            # Border + view indicator
+            cv2.rectangle(mosaic, (x, y), (x + w0 - 1, y + h0 - 1), (255, 255, 255), 2)
+            view_idx = i % num_views
+            cv2.putText(mosaic, f"View {view_idx}", (x + 5, y + h0 - 5),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+        title = "PE Overlay (Original) + Crop Window - Batch 0"
+        cv2.putText(mosaic, title, (10, 25),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+        pe_fname = self.save_dir / f"train_batch{ni}_pe_full.jpg"
+        cv2.imwrite(str(pe_fname), mosaic)
+        if self.args.plots:
+            LOGGER.info(f"{colorstr('bold')}Saved original PE visualization to {pe_fname.name}")
 
     def on_train_epoch_end(self):
         """Called at the end of each training epoch. Log PE cache statistics."""

@@ -83,6 +83,12 @@ embed: # (list[int], optional) return feature embeddings from given layer indice
 
 # Visualize settings ---------------------------------------------------------------------------------------------------
 show: False # (bool) show images/videos in a window if supported
+val_tile: False # (bool) enable sliding-window val/test
+val_tile_size: 640 # (int) tile size for val/test
+val_tile_stride: 480 # (int) tile stride for val/test
+val_tile_disable_fusion: False # (bool) disable multiview fusion during tiled val/test
+val_tile_original: False # (bool) use original-resolution tiles for val/test
+val_original: False # (bool) validate on original image size (skip LetterBox)
 save_frames: False # (bool) save individual frames from video predictions
 save_txt: False # (bool) save results as .txt files (xywh format)
 save_conf: False # (bool) save confidence scores with results
